@@ -1,5 +1,6 @@
 const login = require('../../../platforms/qqmusic/module/login_cookie')
 const refresh = require('../../../platforms/qqmusic/module/login_refresh')
+const checkExpired = require('../../../platforms/qqmusic/module/login_check_expired')
 
 describe('QQ Cookie validation and credential refresh', () => {
   let http
@@ -16,6 +17,20 @@ describe('QQ Cookie validation and credential refresh', () => {
   test('rejects expired cookies', async () => {
     http.mockResolvedValueOnce(Response.json({ code: 1000 }))
     await expect(login({ uin: '123', qm_keyst: 'expired' })).rejects.toThrow('Cookie 无效或已过期')
+  })
+  test('checks QQ credential expiry without refreshing a valid cookie', async () => {
+    http.mockResolvedValueOnce(Response.json({ code: 0 }))
+    expect(await checkExpired({ uin: 'o123', qm_keyst: 'secret' })).toEqual({ expired: false })
+    const [url] = http.mock.calls[0]
+    expect(url.searchParams.get('loginUin')).toBe('123')
+  })
+  test('marks an invalid QQ credential as expired', async () => {
+    http.mockResolvedValueOnce(Response.json({ code: 1000 }))
+    expect(await checkExpired({ uin: '123', qm_keyst: 'expired' })).toEqual({ expired: true })
+  })
+  test('rejects an invalid expiry-check response', async () => {
+    http.mockResolvedValueOnce(Response.json({ unexpected: true }))
+    await expect(checkExpired({ uin: '123', qm_keyst: 'secret' })).rejects.toThrow('无效响应')
   })
   test('a valid Cookie need not include a profile nickname', async () => {
     http.mockResolvedValueOnce(Response.json({ code: 0 }))

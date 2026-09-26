@@ -5,11 +5,11 @@ import { createWowRouter, openApiDocument } from 'aduoer-wow-sdk';
 import { createWowContextResolver } from './adapter';
 import { preloadData } from './onload';
 import { APIError } from './errors';
-import { AccountSessionRegistry, loadAccountSessions } from './accounts';
+import { AccountSessionRegistry, extractAuthorizationToken, loadAccountSessions } from './accounts';
 import type { AccountStore } from './storage';
 import { createLoginRouter } from './login';
 import { createDashboardRouter } from './dashboard';
-import { createLoginRefreshScheduler } from './loginRefresh';
+import { createLoginRefreshScheduler, ensureQQLoginFresh } from './loginRefresh';
 import { createLxSourceUpdateScheduler } from './lx-resource/scheduler';
 import type { LxSourceLifecycle, LxTrackUrlResolver } from './lx-resource/types';
 
@@ -20,7 +20,7 @@ const platformFactory = require('../platforms/PlatformFactory');
 const NeteasePlatform = require('../platforms/netease/NeteasePlatform');
 const QQMusicPlatform = require('../platforms/qqmusic/QQMusicPlatform');
 
-const INTERNAL_RESOURCE_ROUTES = new Set(['login/refresh', 'login/phone/send', 'login/phone/check', 'login/cookie']);
+const INTERNAL_RESOURCE_ROUTES = new Set(['login/refresh', 'login/check/expired', 'login/phone/send', 'login/phone/check', 'login/cookie']);
 
 class MultiPlatformServer {
   private app: Express | null = null;
@@ -134,6 +134,23 @@ class MultiPlatformServer {
       allowAccountLxSources: !this.cloudflare,
       onAccountsChanged: () => this.reconcileLxSources()
     }));
+    this.app!.use('/v1', async (req: Request, _res: Response, next: NextFunction) => {
+      const key = extractAuthorizationToken(req.header('Authorization'));
+      const session = this.accountSessions.byAccessKey.get(key);
+      if (!session || session.platform !== 'qq') return next();
+      try {
+        await ensureQQLoginFresh(session, {
+          registry: this.accountSessions,
+          platformFactory,
+          accountStore: this.accountStore,
+          logger: this.logger
+        });
+        next();
+      } catch (error) {
+        this.logger.error('QQ 登录状态检查或刷新失败，继续使用当前凭证', error);
+        next();
+      }
+    });
     this.app!.use(createWowRouter({
       resolveContext: createWowContextResolver(this.accountSessions, this.lxSourceManager),
       onError: (error, request) => this.logger.error('Wow v1 request failed', error, { url: request.url })
