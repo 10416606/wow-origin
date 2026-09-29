@@ -33,6 +33,69 @@ function trackUrl(url: string, quality: LxQuality): TrackUrl {
   return { url, quality: quality === 'flac' ? 'lossless' : quality, format: '', bitrate: null, size: 0 };
 }
 
+class UnavailableAudioError extends Error {}
+
+// Read only a small prefix. Some CDNs ignore Range and stream the entire song.
+async function inspectAudio(track: TrackUrl, timeoutMs: number): Promise<TrackUrl> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  try {
+    const response = await fetch(track.url, {
+      headers: { Range: 'bytes=0-4095', 'Accept-Encoding': 'identity' },
+      signal: controller.signal,
+      redirect: 'follow'
+    });
+    if (!response.ok) {
+      void response.body?.cancel().catch(() => {});
+      throw new UnavailableAudioError('Audio address unavailable');
+    }
+    const contentType = response.headers.get('content-type') || '';
+    if (/text\/html|application\/json/i.test(contentType)) {
+      void response.body?.cancel().catch(() => {});
+      throw new UnavailableAudioError('Audio address returned an error document');
+    }
+    const range = response.headers.get('content-range')?.match(/^bytes\s+\d+-\d+\/(\d+)$/i);
+    const length = response.status === 200 && !response.headers.get('content-encoding')
+      ? Number(response.headers.get('content-length')) : 0;
+    const size = range ? Number(range[1]) : length;
+    if (Number.isSafeInteger(size) && size > 0) track = { ...track, size };
+    reader = response.body?.getReader();
+    const prefix = new Uint8Array(42);
+    let count = 0;
+    while (reader && count < prefix.length) {
+      const part = await reader.read();
+      if (part.done) break;
+      const take = part.value.subarray(0, prefix.length - count);
+      prefix.set(take, count);
+      count += take.length;
+    }
+    if (count >= 42 && Buffer.from(prefix.subarray(0, 4)).toString() === 'fLaC'
+      && (prefix[4] & 0x7f) === 0 && prefix[7] === 34) {
+      const packed = Buffer.from(prefix).readBigUInt64BE(18);
+      const sampleRate = Number(packed >> 44n);
+      const samples = Number(packed & ((1n << 36n) - 1n));
+      const bitrate = sampleRate > 0 && samples > 0 && track.size > 0
+        ? Math.round(track.size * 8 * sampleRate / samples) : null;
+      return { ...track, format: 'flac', bitrate };
+    }
+    if (count >= 3 && (Buffer.from(prefix.subarray(0, 3)).toString() === 'ID3'
+      || (prefix[0] === 0xff && (prefix[1] & 0xe0) === 0xe0))) {
+      return { ...track, format: 'mp3' };
+    }
+    if (/audio\/mp4|audio\/x-m4a/i.test(contentType)) return { ...track, format: 'm4a' };
+    return track;
+  } catch (error) {
+    if (error instanceof UnavailableAudioError) throw error;
+    // Missing metadata or a slow probe must not break an otherwise usable URL.
+    return track;
+  } finally {
+    if (reader) void reader.cancel().catch(() => {});
+    controller.abort();
+    clearTimeout(timer);
+  }
+}
+
 function parseBody(raw: Buffer): unknown {
   const text = raw.toString();
   try { return JSON.parse(text); } catch { return text; }
@@ -153,8 +216,11 @@ export class CloudflareLxSourceManager implements AppLxSourceManager {
   getQualityOptions(platform: MusicPlatform) {
     const supported = this.capabilities[platform === 'qq' ? 'tx' : 'wy']?.qualities || [];
     const labels = { flac24bit: '24 位无损', hires: 'Hi-Res 高解析', master: '母带' };
-    return (Object.keys(labels) as (keyof typeof labels)[])
-      .filter((key) => supported.includes(key)).map((key) => ({ key, label: labels[key] }));
+    return [
+      ...(Object.keys(labels) as (keyof typeof labels)[])
+        .filter((key) => supported.includes(key)).map((key) => ({ key, label: labels[key] })),
+      ...(supported.length ? [{ key: 'max', label: '自动最高音质（失败逐级降级）' }] : [])
+    ];
   }
   reconcileAccountSources(): void {}
   async updateAll(): Promise<void> {}
@@ -171,8 +237,8 @@ export class CloudflareLxSourceManager implements AppLxSourceManager {
       const remaining = deadline - Date.now();
       if (remaining <= 0) break;
       try {
-        const result = await this.resolveQuality(platform, id, quality, remaining);
-        if (result) return result;
+        const result = await this.resolveQuality(platform, id, quality, Math.min(3500, remaining));
+        if (result) return await inspectAudio(result, Math.min(2000, Math.max(1, deadline - Date.now())));
       } catch {
         // Try a lower supported quality; never log private source URLs.
       }
