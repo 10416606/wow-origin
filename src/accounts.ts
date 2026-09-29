@@ -22,6 +22,11 @@ export interface MusicAccountSession {
   useLuoxue: boolean;
   lxSource: string[];
   favoriteTrackIds: Set<string>;
+  userPlaylistIds: Set<string>;
+  favoriteArtistIds: Set<string>;
+  favoriteAlbumIds: Set<string>;
+  favoriteArtistsLoaded: boolean;
+  favoriteAlbumsLoaded: boolean;
 }
 
 export interface AccountSessionRegistry {
@@ -250,7 +255,12 @@ export function loadAccountSessions(storeInput: AccountStoreInput = process.cwd(
         stateless,
         useLuoxue: useLuoxue.value,
         lxSource: loadAccountLxSources(account.lxSource, accountName),
-        favoriteTrackIds: new Set<string>()
+        favoriteTrackIds: new Set<string>(),
+        userPlaylistIds: new Set<string>(),
+        favoriteArtistIds: new Set<string>(),
+        favoriteAlbumIds: new Set<string>(),
+        favoriteArtistsLoaded: false,
+        favoriteAlbumsLoaded: false
       });
       keyCounts.set(apiAccessKey, (keyCounts.get(apiAccessKey) || 0) + 1);
     } catch (error) {
@@ -384,7 +394,12 @@ export function createAccountWithCookie(
     stateless: false,
     useLuoxue: true,
     lxSource: [],
-    favoriteTrackIds: new Set<string>()
+    favoriteTrackIds: new Set<string>(),
+    userPlaylistIds: new Set<string>(),
+    favoriteArtistIds: new Set<string>(),
+    favoriteAlbumIds: new Set<string>(),
+    favoriteArtistsLoaded: false,
+    favoriteAlbumsLoaded: false
   };
   registry.sessions.push(session);
   registry.byAccessKey.set(token, session);

@@ -1,5 +1,4 @@
 // 收藏/取消收藏专辑
-const e = require('express')
 const albumDetail = require('./album.js')
 
 module.exports = async (query, request) => {
@@ -8,17 +7,17 @@ module.exports = async (query, request) => {
     throw new Error("need uin and qm_keyst")
   } else if(!query.id){
     throw new Error("need id")
-  } else if(!query.t){
+  } else if(query.t === undefined || query.t === null){
     throw new Error("need t")
   }
 
   const method = query.t == 1 ? 'FavAlbum' : 'CancelFavAlbum'
 
   const mid = await albumDetail({id: query.id}, request).then(res => {
-    if(!res.album){
+    if(!res?.mid){
       throw new Error("not found album")
     }
-    return res.album.mid
+    return res.mid
   })
 
   const data = {

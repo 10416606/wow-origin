@@ -12,6 +12,7 @@ import {
 import type { MusicPlatform } from './types';
 import { BadRequestError, UpstreamError } from './errors';
 import { qrCodeDataUrl } from './qr';
+import { preloadSessionFavorites } from './onload';
 
 type ResourcePlatform = 'netease' | 'qqmusic';
 type LoginMode = 'create' | 'update';
@@ -245,10 +246,20 @@ export function createLoginRouter({
   async function saveLogin(target: PendingLogin, cookie: string, verifiedName?: string) {
     if (!cookie) throw new UpstreamError('登录成功但未获取到有效 cookie');
     const { mode, platform, apiAccessKey } = target;
+    const previousCookie = mode === 'update' ? registry.byAccessKey.get(apiAccessKey)?.cookie : undefined;
     const result = mode === 'update'
       ? updateAccountCookieByAccessKey(apiAccessKey, platform, cookie, registry, storage)
       : createAccountWithCookie(apiAccessKey, platform, cookie, registry, storage,
         verifiedName ?? await resolveLoggedInAccountName(platform, cookie, platformFactory));
+    if (previousCookie !== undefined && previousCookie !== result.session.cookie) {
+      result.session.favoriteTrackIds.clear();
+      result.session.userPlaylistIds.clear();
+      result.session.favoriteArtistIds.clear();
+      result.session.favoriteAlbumIds.clear();
+      result.session.favoriteArtistsLoaded = false;
+      result.session.favoriteAlbumsLoaded = false;
+    }
+    await preloadSessionFavorites(result.session);
     onAccountsChanged?.();
     return { status: 'success', mode, ...accountData(result.session, allowAccountLxSources), accountName: result.session.name, message: '登录成功' };
   }

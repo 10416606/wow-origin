@@ -236,7 +236,7 @@ describe('Wow adapter', () => {
     expect(lxResolver.resolveTrackUrl).not.toHaveBeenCalled()
   })
 
-  test('resolver 根据 Bearer token 返回 SDK 请求上下文', () => {
+  test('resolver 根据 Bearer token 返回 SDK 请求上下文', async () => {
     const resolver = createWowContextResolver({
       sessions: [],
       byAccessKey: new Map([
@@ -250,7 +250,7 @@ describe('Wow adapter', () => {
         }]
       ])
     })
-    const context = resolver({ authorization: 'Bearer token-1', request: {} })
+    const context = await resolver({ authorization: 'Bearer token-1', request: {} })
 
     expect(context.accountName).toBe('网易云')
     expect(context.stateless).toBe(false)
@@ -260,9 +260,56 @@ describe('Wow adapter', () => {
     ]))
   })
 
-  test('resolver 在认证失败时返回 null', () => {
+  test('resolver 在认证失败时返回 null', async () => {
     const resolver = createWowContextResolver({ sessions: [], byAccessKey: new Map() })
 
-    expect(resolver({ authorization: undefined, request: {} })).toBeNull()
+    await expect(resolver({ authorization: undefined, request: {} })).resolves.toBeNull()
+  })
+
+  test('未预加载的账号首次打开专辑详情时只加载一次艺人和专辑收藏', async () => {
+    const account = {
+      platform: 'qq', name: 'QQ', cookie: 'uin=o123; qm_keyst=key', apiAccessKey: 'token-1',
+      favoriteTrackIds: new Set(), favoriteArtistIds: new Set(), favoriteAlbumIds: new Set(),
+      favoriteArtistsLoaded: false, favoriteAlbumsLoaded: false
+    }
+    const artistLoad = jest.spyOn(QQClient.prototype, 'userArtists').mockImplementation(async function () {
+      this.favoriteArtistSet.add('artist-mid')
+      return [{ id: 'artist-mid' }]
+    })
+    const albumLoad = jest.spyOn(QQClient.prototype, 'userAlbums').mockImplementation(async function () {
+      this.favoriteAlbumSet.add('123')
+      return [{ id: '123' }]
+    })
+    const resolver = createWowContextResolver({ sessions: [account], byAccessKey: new Map([['token-1', account]]) })
+    const input = { authorization: 'Bearer token-1', request: { path: '/album/detail' } }
+
+    await resolver(input)
+    await resolver(input)
+
+    expect(artistLoad).toHaveBeenCalledTimes(1)
+    expect(albumLoad).toHaveBeenCalledTimes(1)
+    expect(account.favoriteArtistIds.has('artist-mid')).toBe(true)
+    expect(account.favoriteAlbumIds.has('123')).toBe(true)
+  })
+
+  test('直接重取艺人和专辑列表后标记账号已加载', async () => {
+    const account = {
+      platform: 'qq', name: 'QQ', cookie: 'uin=o123; qm_keyst=key', apiAccessKey: 'token-1',
+      favoriteTrackIds: new Set(), userPlaylistIds: new Set(),
+      favoriteArtistIds: new Set(), favoriteAlbumIds: new Set(),
+      favoriteArtistsLoaded: false, favoriteAlbumsLoaded: false
+    }
+    const artistLoad = jest.spyOn(QQClient.prototype, 'userArtists').mockResolvedValue([{ id: 'artist-mid' }])
+    const albumLoad = jest.spyOn(QQClient.prototype, 'userAlbums').mockResolvedValue([{ id: '123' }])
+    const resolver = createWowContextResolver({ sessions: [account], byAccessKey: new Map([['token-1', account]]) })
+    const context = await resolver({ authorization: 'Bearer token-1', request: { path: '/user/artist/list' } })
+    await context.adapter.userArtists()
+    await context.adapter.userAlbums()
+    await resolver({ authorization: 'Bearer token-1', request: { path: '/album/detail' } })
+
+    expect(account.favoriteArtistsLoaded).toBe(true)
+    expect(account.favoriteAlbumsLoaded).toBe(true)
+    expect(artistLoad).toHaveBeenCalledTimes(1)
+    expect(albumLoad).toHaveBeenCalledTimes(1)
   })
 })

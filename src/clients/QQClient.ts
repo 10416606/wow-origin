@@ -32,19 +32,19 @@ export class QQClient extends MusicClientBase {
   private readonly uin: string;
   private readonly qm_keyst: string;
 
-  constructor(cookie: string, favoriteTrackSet?: Set<string>) {
-    super(cookie, 'qq', favoriteTrackSet);
+  constructor(cookie: string, favoriteTrackSet?: Set<string>, favoriteArtistSet?: Set<string>, favoriteAlbumSet?: Set<string>, userPlaylistSet?: Set<string>) {
+    super(cookie, 'qq', favoriteTrackSet, favoriteArtistSet, favoriteAlbumSet, userPlaylistSet);
     const credentials = normalizeQQCredentials(cookie);
     this.uin = credentials.uin;
     this.qm_keyst = credentials.qm_keyst;
   }
 
-  private async call(route: string, query: Record<string, any> = {}): Promise<any> {
+  private async call(route: string, query: Record<string, any> = {}, keepEnvelope = false): Promise<any> {
     const result = await this.callModule(route, {
       ...query,
       uin: this.uin,
       qm_keyst: this.qm_keyst
-    });
+    }, {}, keepEnvelope);
     return result;
   }
 
@@ -106,7 +106,7 @@ export class QQClient extends MusicClientBase {
   async getTopArtists(): Promise<Artist[]> {
     const raw = await this.call('top_artists');
     const artists = this.toArrayPayload(raw, ['artists', 'list']);
-    return artists.map((item: any) => mapArtist(item));
+    return this.withFavoriteArtists(artists.map((item: any) => mapArtist(item)));
   }
 
   async getRecommendedPlaylist(offset: number, limit: number): Promise<PlaylistPage> {
@@ -197,7 +197,9 @@ export class QQClient extends MusicClientBase {
   async searchSuggest(keyword: string): Promise<SearchSuggest> {
     const raw = await this.call('search_suggest', { keywords: keyword });
     const result = mapSearchSuggest(raw);
-    return { ...result, songs: this.withFavoriteTracks(result.songs) };
+    const artists = this.withFavoriteArtists(result.artists);
+    const albums = this.withFavoriteAlbums(result.albums);
+    return { ...result, songs: this.withFavoriteTracks(result.songs), artists, albums };
   }
 
   async searchTracks(keyword: string, offset: number, limit: number): Promise<TrackPage> {
@@ -211,7 +213,7 @@ export class QQClient extends MusicClientBase {
   async searchArtists(keyword: string, offset: number, limit: number): Promise<ArtistPage> {
     const raw = await this.call('cloudsearch', { keywords: keyword, type: 100, offset, limit });
     const result = raw.result || {};
-    const items = Array.isArray(result.artists) ? result.artists.map((item: any) => mapArtist(item)) : [];
+    const items = this.withFavoriteArtists(Array.isArray(result.artists) ? result.artists.map((item: any) => mapArtist(item)) : []);
     const total = result.artistCount || 0;
     return { items, offset, limit, hasMore: offset + items.length < total };
   }
@@ -219,7 +221,7 @@ export class QQClient extends MusicClientBase {
   async searchAlbums(keyword: string, offset: number, limit: number): Promise<AlbumPage> {
     const raw = await this.call('cloudsearch', { keywords: keyword, type: 10, offset, limit });
     const result = raw.result || {};
-    const items = Array.isArray(result.albums) ? result.albums.map((item: any) => mapAlbum(item)) : [];
+    const items = this.withFavoriteAlbums(Array.isArray(result.albums) ? result.albums.map((item: any) => mapAlbum(item)) : []);
     const total = result.albumCount || 0;
     return { items, offset, limit, hasMore: offset + items.length < total };
   }
@@ -236,10 +238,14 @@ export class QQClient extends MusicClientBase {
     const raw = await this.call('artist_detail', { id });
     const data = raw.data?.artist || raw.artist || raw.data || raw;
     const detail = mapArtistDetail(data);
+    detail.favorite = this.hasFavoriteArtist(detail.id);
     if (trackLimit !== 0) {
       const limit = trackLimit === -1 ? 1000 : trackLimit;
       const tracks = await this.call('artist_tracks', { id, order: 'hot', offset: 0, limit });
-      detail.tracks = (tracks.songs || []).map((item: any) => this.withFavoriteTrack(mapTrack(item)));
+      detail.tracks = (tracks.songs || []).map((item: any) => {
+        const track = this.withFavoriteTrack(mapTrack(item));
+        return { ...track, artists: this.withFavoriteArtists(track.artists) };
+      });
     }
     return detail;
   }
@@ -253,7 +259,7 @@ export class QQClient extends MusicClientBase {
 
   async getArtistAlbums(id: string, offset: number, limit: number): Promise<AlbumPage> {
     const raw = await this.call('artist_album', { id, offset, limit });
-    const items = Array.isArray(raw.hotAlbums) ? raw.hotAlbums.map((item: any) => mapAlbum(item)) : [];
+    const items = this.withFavoriteAlbums(Array.isArray(raw.hotAlbums) ? raw.hotAlbums.map((item: any) => mapAlbum(item)) : []);
     const total = raw.total || 0;
     return { items, offset, limit, hasMore: offset + items.length < total };
   }
@@ -261,14 +267,40 @@ export class QQClient extends MusicClientBase {
   async getAlbumDetail(id: string, trackLimit: number = -1): Promise<AlbumDetail> {
     const raw = await this.call('album', { id, trackLimit });
     const detail = mapAlbumDetail(raw);
-    detail.tracks = trackLimit !== 0 ? this.withFavoriteTracks(detail.tracks) : [];
+    detail.favorite = this.hasFavoriteAlbum(detail.id);
+    if (detail.artist) detail.artist.favorite = this.hasFavoriteArtist(detail.artist.id);
+    detail.tracks = trackLimit !== 0 ? this.withFavoriteTracks(detail.tracks).map((track) => ({
+      ...track,
+      album: { ...track.album, favorite: this.hasFavoriteAlbum(track.album.id) },
+      artists: this.withFavoriteArtists(track.artists)
+    })) : [];
     return detail;
   }
 
   async getUserPlaylist(): Promise<Playlist[]> {
     const result = await this.call('user_playlist', { uin: this.uin });
     const playlists = result.playlist || [];
-    return playlists.map((item: any) => mapPlaylist(item));
+    const items = playlists.map((item: any) => mapPlaylist(item));
+    this.replaceUserPlaylists(items);
+    return items;
+  }
+
+  async userArtists(): Promise<Artist[]> {
+    const artists = await this.loadSubscribedItems(
+      (offset, limit) => this.call('artist_sublist', { offset, limit }, true),
+      mapArtist
+    );
+    this.replaceFavoriteArtists(artists);
+    return artists;
+  }
+
+  async userAlbums(): Promise<Album[]> {
+    const albums = await this.loadSubscribedItems(
+      (offset, limit) => this.call('album_sublist', { offset, limit }, true),
+      mapAlbum
+    );
+    this.replaceFavoriteAlbums(albums);
+    return albums;
   }
 
   async userFavoriteTracks(): Promise<Track[]> {
@@ -345,7 +377,24 @@ export class QQClient extends MusicClientBase {
 
   async favoritePlaylist(id: string, status: boolean): Promise<{ success: boolean; status: boolean }> {
     await this.call('playlist_subscribe', { id, t: status ? 1 : 0 });
+    this.setUserPlaylist(id, status);
     return { success: true, status };
+  }
+
+  async favoriteArtist(id: string, status: boolean): Promise<{ success: boolean; status: boolean }> {
+    const raw = await this.call('artist_sub', { id, t: status ? 1 : 0 });
+    const result = raw.body || raw;
+    const success = Number(result.retCode ?? result.code ?? 0) === 0;
+    if (success) this.setFavoriteArtist(id, status);
+    return { success, status: success ? status : this.hasFavoriteArtist(id) };
+  }
+
+  async favoriteAlbum(id: string, status: boolean): Promise<{ success: boolean; status: boolean }> {
+    const raw = await this.call('album_sub', { id, t: status ? 1 : 0 });
+    const result = raw.body || raw;
+    const success = Number(result.retCode ?? result.code ?? 0) === 0;
+    if (success) this.setFavoriteAlbum(id, status);
+    return { success, status: success ? status : this.hasFavoriteAlbum(id) };
   }
 
   private async resolveWritableSongId(id: string): Promise<string | number> {

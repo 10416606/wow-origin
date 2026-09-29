@@ -16,6 +16,9 @@ export interface ProxyAccount {
   apiAccessKey: string;
   stateless: boolean;
   favoriteTrackIds: string[];
+  userPlaylistIds: string[] | null;
+  favoriteArtistIds: string[] | null;
+  favoriteAlbumIds: string[] | null;
   updatedAt: number;
 }
 
@@ -48,6 +51,15 @@ function normalizeAccount(value: Partial<ProxyAccount>): ProxyAccount {
     favoriteTrackIds: Array.isArray(value.favoriteTrackIds)
       ? [...new Set(value.favoriteTrackIds.map(String).filter(Boolean))]
       : [],
+    userPlaylistIds: Array.isArray(value.userPlaylistIds)
+      ? [...new Set(value.userPlaylistIds.map(String).filter(Boolean))]
+      : null,
+    favoriteArtistIds: Array.isArray(value.favoriteArtistIds)
+      ? [...new Set(value.favoriteArtistIds.map(String).filter(Boolean))]
+      : null,
+    favoriteAlbumIds: Array.isArray(value.favoriteAlbumIds)
+      ? [...new Set(value.favoriteAlbumIds.map(String).filter(Boolean))]
+      : null,
     updatedAt: Number(value.updatedAt) || Date.now()
   };
 }
@@ -113,6 +125,9 @@ export class ProxyAccountStore {
       apiAccessKey,
       stateless: typeof input.stateless === 'boolean' ? input.stateless : false,
       favoriteTrackIds: [],
+      userPlaylistIds: null,
+      favoriteArtistIds: null,
+      favoriteAlbumIds: null,
       updatedAt: Date.now()
     });
     this.write([...accounts, account]);
@@ -124,9 +139,16 @@ export class ProxyAccountStore {
     const index = accounts.findIndex((account) => account.apiAccessKey === apiAccessKey);
     if (index < 0) throw new Error('api_access_key 无效');
     const current = accounts[index];
+    const cookieChanged = changes.cookie !== undefined && changes.cookie !== current.cookie;
     const account = normalizeAccount({
       ...current,
       ...changes,
+      ...(cookieChanged ? {
+        favoriteTrackIds: [],
+        userPlaylistIds: null,
+        favoriteArtistIds: null,
+        favoriteAlbumIds: null
+      } : {}),
       platform: current.platform,
       apiAccessKey: current.apiAccessKey,
       updatedAt: Date.now()

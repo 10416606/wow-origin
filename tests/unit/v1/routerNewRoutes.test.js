@@ -251,6 +251,28 @@ describe('v1 新增路由', () => {
     expect(trackResponse.body.data).toEqual({ success: true, status: true })
   })
 
+  test('SDK 0.3.1 路由提供艺人与专辑收藏写入和列表读取', async () => {
+    const service = createService({
+      favoriteArtist: jest.fn().mockResolvedValue({ success: true, status: true }),
+      favoriteAlbum: jest.fn().mockResolvedValue({ success: true, status: false }),
+      userArtists: jest.fn().mockResolvedValue([{ id: 'artist-1', name: '艺人', coverUrl: '', favorite: true }]),
+      userAlbums: jest.fn().mockResolvedValue([{ id: 'album-1', name: '专辑', coverUrl: '', favorite: true }])
+    })
+    const app = createApp(service)
+
+    const artistWrite = await request(app).post('/v1/artist/favorite').send({ id: 'artist-1', status: true }).expect(200)
+    const albumWrite = await request(app).post('/v1/album/favorite').send({ id: 'album-1', status: false }).expect(200)
+    const artists = await request(app).get('/v1/user/artist/list').expect(200)
+    const albums = await request(app).get('/v1/user/album/list').expect(200)
+
+    expect(service.favoriteArtist).toHaveBeenCalledWith('artist-1', true)
+    expect(service.favoriteAlbum).toHaveBeenCalledWith('album-1', false)
+    expect(artistWrite.body.data).toEqual({ success: true, status: true })
+    expect(albumWrite.body.data).toEqual({ success: true, status: false })
+    expect(artists.body.data).toEqual([{ id: 'artist-1', name: '艺人', coverUrl: '', favorite: true }])
+    expect(albums.body.data).toEqual([{ id: 'album-1', name: '专辑', coverUrl: '', favorite: true }])
+  })
+
   test('歌单写操作缺少必填参数返回 400', async () => {
     const service = createService()
     const app = createApp(service)

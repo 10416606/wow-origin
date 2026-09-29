@@ -1,8 +1,9 @@
-import type { ResolveWowContext, TrackUrl, WowAdapter } from 'aduoer-wow-sdk';
+import type { ResolveWowContext, TrackUrl } from 'aduoer-wow-sdk';
 import { type AccountSessionRegistry, type MusicAccountSession, extractAuthorizationToken } from './accounts';
 import { NeteaseClient } from './clients/NeteaseClient';
 import { QQClient } from './clients/QQClient';
 import { getQualityOptions } from './quality';
+import { collectionStatusNeeded } from './collectionStatus';
 import type { MusicPlatform } from './types';
 import type { LxTrackUrlResolver } from './lx-resource';
 
@@ -10,11 +11,14 @@ import type { LxTrackUrlResolver } from './lx-resource';
 export function createMusicClient(
   platform: MusicPlatform,
   cookie: string,
-  favoriteTrackIds?: Set<string>
+  favoriteTrackIds?: Set<string>,
+  favoriteArtistIds?: Set<string>,
+  favoriteAlbumIds?: Set<string>,
+  userPlaylistIds?: Set<string>
 ): QQClient | NeteaseClient {
   return platform === 'qq'
-    ? new QQClient(cookie, favoriteTrackIds)
-    : new NeteaseClient(cookie, favoriteTrackIds);
+    ? new QQClient(cookie, favoriteTrackIds, favoriteArtistIds, favoriteAlbumIds, userPlaylistIds)
+    : new NeteaseClient(cookie, favoriteTrackIds, favoriteArtistIds, favoriteAlbumIds, userPlaylistIds);
 }
 
 function hasValidAudioUrl(trackUrl: TrackUrl | undefined): trackUrl is TrackUrl {
@@ -30,8 +34,20 @@ function hasValidAudioUrl(trackUrl: TrackUrl | undefined): trackUrl is TrackUrl 
 export function createAdapter(
   account: MusicAccountSession,
   lxTrackUrlResolver?: LxTrackUrlResolver
-): WowAdapter {
-  const client = createMusicClient(account.platform, account.cookie, account.favoriteTrackIds);
+): QQClient | NeteaseClient {
+  const client = createMusicClient(account.platform, account.cookie, account.favoriteTrackIds, account.favoriteArtistIds, account.favoriteAlbumIds, account.userPlaylistIds);
+  const userArtists = client.userArtists.bind(client);
+  client.userArtists = async () => {
+    const artists = await userArtists();
+    account.favoriteArtistsLoaded = true;
+    return artists;
+  };
+  const userAlbums = client.userAlbums.bind(client);
+  client.userAlbums = async () => {
+    const albums = await userAlbums();
+    account.favoriteAlbumsLoaded = true;
+    return albums;
+  };
   if (account.useLuoxue === false || !lxTrackUrlResolver) return client;
 
   const defaultGetTrackUrl = client.getTrackUrl.bind(client);
@@ -63,13 +79,31 @@ export function createWowContextResolver(
   registry: AccountSessionRegistry,
   lxTrackUrlResolver?: LxTrackUrlResolver
 ): ResolveWowContext {
-  return ({ authorization }) => {
+  return async ({ authorization, request }) => {
     const token = extractAuthorizationToken(authorization);
     const account = token ? registry.byAccessKey.get(token) : undefined;
     if (!account) return null;
 
+    const adapter = createAdapter(account, lxTrackUrlResolver);
+    const needed = collectionStatusNeeded(request?.path || '');
+    if (needed.artists && !account.favoriteArtistsLoaded) {
+      try {
+        await adapter.userArtists();
+        account.favoriteArtistsLoaded = true;
+      } catch {
+        // 保留已有集合；下一次需要状态时重试。
+      }
+    }
+    if (needed.albums && !account.favoriteAlbumsLoaded) {
+      try {
+        await adapter.userAlbums();
+        account.favoriteAlbumsLoaded = true;
+      } catch {
+        // 保留已有集合；下一次需要状态时重试。
+      }
+    }
     return {
-      adapter: createAdapter(account, lxTrackUrlResolver),
+      adapter,
       qualityMap: getQualityOptions(account.platform),
       accountName: account.name,
       stateless: account.stateless
