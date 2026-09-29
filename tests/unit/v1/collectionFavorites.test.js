@@ -40,7 +40,7 @@ describe('artist and album favorites', () => {
       if (route === 'album/sublist') {
         return Promise.resolve({ code: 200, data: [{ id: 123, mid: 'album-mid', name: '专辑', createTime: 1700000000000 }], more: false })
       }
-      return Promise.resolve({ code: 200, body: { retCode: route === 'artist/sub' ? 0 : 1 } })
+      return Promise.resolve({ code: 200, body: { retCode: route === 'artist/sub' ? (query.t === 1 ? 1000 : 0) : 1 } })
     })
     global.__musicPlatformFactory__ = { getPlatform: () => ({ callModule }) }
     const artists = new Set(['artist-mid'])
@@ -48,6 +48,7 @@ describe('artist and album favorites', () => {
     const client = new QQClient('uin=o123; qm_keyst=key', new Set(), artists, albums)
 
     await expect(client.favoriteArtist('artist-mid', false)).resolves.toEqual({ success: true, status: false })
+    await expect(client.favoriteArtist('artist-mid', true)).resolves.toEqual({ success: false, status: false })
     await expect(client.favoriteAlbum('123', true)).resolves.toEqual({ success: false, status: false })
     expect(artists.has('artist-mid')).toBe(false)
     expect(albums.has('123')).toBe(false)
@@ -55,6 +56,16 @@ describe('artist and album favorites', () => {
     expect(callModule).toHaveBeenCalledWith('album/sub', expect.objectContaining({ query: expect.objectContaining({ t: 1, uin: '123', qm_keyst: 'key' }) }))
     await expect(client.userArtists()).resolves.toMatchObject([{ id: 'artist-mid', favorite: true }, { id: 'artist-mid-2', favorite: true }])
     await expect(client.userAlbums()).resolves.toMatchObject([{ id: '123', favorite: true, publishTime: 1700000000000 }])
+  })
+
+  test('网易云关注艺人返回空响应时仍更新收藏状态', async () => {
+    const callModule = jest.fn().mockResolvedValue({ code: 200, data: null })
+    global.__musicPlatformFactory__ = { getPlatform: () => ({ callModule }) }
+    const artists = new Set()
+    const client = new NeteaseClient('MUSIC_U=music-u', new Set(), artists)
+
+    await expect(client.favoriteArtist('123', true)).resolves.toEqual({ success: true, status: true })
+    expect(artists.has('123')).toBe(true)
   })
 
   test.each([

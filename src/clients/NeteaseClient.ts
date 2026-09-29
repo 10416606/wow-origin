@@ -377,14 +377,14 @@ export class NeteaseClient extends MusicClientBase {
 
   async favoriteArtist(id: string, status: boolean): Promise<{ success: boolean; status: boolean }> {
     const raw = await this.call('artist_sub', { id, t: status ? 1 : 0 });
-    const success = Number(raw.code ?? 200) === 200;
+    const success = Number(raw?.code ?? 200) === 200;
     if (success) this.setFavoriteArtist(id, status);
     return { success, status: success ? status : this.hasFavoriteArtist(id) };
   }
 
   async favoriteAlbum(id: string, status: boolean): Promise<{ success: boolean; status: boolean }> {
     const raw = await this.call('album_sub', { id, t: status ? 1 : 0 });
-    const success = Number(raw.code ?? 200) === 200;
+    const success = Number(raw?.code ?? 200) === 200;
     if (success) this.setFavoriteAlbum(id, status);
     return { success, status: success ? status : this.hasFavoriteAlbum(id) };
   }
