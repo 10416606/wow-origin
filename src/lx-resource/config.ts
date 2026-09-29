@@ -89,7 +89,7 @@ export function selectLxQuality(requestedQuality: string | undefined, supported:
     return LX_QUALITIES.find((quality) => supported.includes(quality));
   }
 
-  const target: LxQuality = requestedQuality === 'standard'
+  const target: LxQuality = LX_QUALITIES.includes(requestedQuality as LxQuality) ? requestedQuality as LxQuality : requestedQuality === 'standard'
     ? '128k'
     : requestedQuality === 'lossless'
       ? 'flac'
@@ -110,5 +110,5 @@ export function mapLxQualityToTrackUrl(url: string, quality: LxQuality) {
   if (quality === '320k') {
     return { url, quality: 'exhigh', format: '', bitrate: 320_000, size: 0 };
   }
-  return { url, quality: 'lossless', format: '', bitrate: null, size: 0 };
+  return { url, quality: quality === 'flac' ? 'lossless' : quality, format: '', bitrate: null, size: 0 };
 }
