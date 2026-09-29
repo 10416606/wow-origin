@@ -42,7 +42,7 @@ async function inspectAudio(track: TrackUrl, timeoutMs: number): Promise<TrackUr
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   try {
     const response = await fetch(track.url, {
-      headers: { Range: 'bytes=0-4095', 'Accept-Encoding': 'identity' },
+      headers: { Range: 'bytes=0-4095', 'Accept-Encoding': 'identity', 'User-Agent': 'Mozilla/5.0' },
       signal: controller.signal,
       redirect: 'follow'
     });
@@ -238,7 +238,7 @@ export class CloudflareLxSourceManager implements AppLxSourceManager {
       if (remaining <= 0) break;
       try {
         const result = await this.resolveQuality(platform, id, quality, Math.min(3500, remaining));
-        if (result) return await inspectAudio(result, Math.min(2000, Math.max(1, deadline - Date.now())));
+        if (result) return await inspectAudio(result, Math.min(6000, Math.max(1, deadline - Date.now())));
       } catch {
         // Try a lower supported quality; never log private source URLs.
       }
