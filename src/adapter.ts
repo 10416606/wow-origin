@@ -53,7 +53,7 @@ export function createAdapter(
   client.getTrackUrl = async (id: string, quality?: string) => {
     const lxTrackUrl = await getLxTrackUrl(id, quality);
     if (lxTrackUrl) return lxTrackUrl;
-    return defaultGetTrackUrl(id, quality);
+    return defaultGetTrackUrl(id, ['flac24bit', 'hires', 'master'].includes(quality || '') ? 'max' : quality);
   };
   return client;
 }
@@ -70,7 +70,10 @@ export function createWowContextResolver(
 
     return {
       adapter: createAdapter(account, lxTrackUrlResolver),
-      qualityMap: getQualityOptions(account.platform),
+      qualityMap: [
+        ...getQualityOptions(account.platform),
+        ...(account.useLuoxue !== false ? lxTrackUrlResolver?.getQualityOptions?.(account.platform) || [] : [])
+      ],
       accountName: account.name,
       stateless: account.stateless
     };

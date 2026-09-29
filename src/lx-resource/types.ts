@@ -15,7 +15,7 @@ export const LX_SOURCE_ENV_KEYS = [
   'LX_SOURCE_URL9'
 ] as const;
 
-export const LX_QUALITIES = ['128k', '320k', 'flac', 'flac24bit'] as const;
+export const LX_QUALITIES = ['128k', '320k', 'flac', 'flac24bit', 'hires', 'master'] as const;
 
 export type LxQuality = typeof LX_QUALITIES[number];
 export type LxPlatform = 'tx' | 'wy';
@@ -63,6 +63,7 @@ export interface LxRuntimeExit {
 }
 
 export interface LxTrackUrlResolver {
+  getQualityOptions?(platform: MusicPlatform): import('aduoer-wow-sdk').QualityOption[];
   resolveTrackUrl(
     platform: MusicPlatform,
     id: string,

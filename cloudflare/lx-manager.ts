@@ -8,7 +8,7 @@ import type { LxPlatform, LxQuality } from '../src/lx-resource/types';
 import { bundledLxSource, installBundledLxSource } from './generated/lx-source';
 
 const EVENT_NAMES = { request: 'request', inited: 'inited', updateAlert: 'updateAlert' } as const;
-const QUALITIES: LxQuality[] = ['128k', '320k', 'flac', 'flac24bit'];
+const QUALITIES: LxQuality[] = ['128k', '320k', 'flac', 'flac24bit', 'hires', 'master'];
 
 type SourceCapability = { actions: string[]; qualities: LxQuality[] };
 type RequestHandler = (input: Record<string, unknown>) => unknown;
@@ -16,7 +16,8 @@ type RequestHandler = (input: Record<string, unknown>) => unknown;
 function selectQuality(requested: string | undefined, supported: readonly LxQuality[]): LxQuality | undefined {
   if (requested === 'max') return [...QUALITIES].reverse().find((item) => supported.includes(item));
   if (requested === 'min') return QUALITIES.find((item) => supported.includes(item));
-  const target: LxQuality = requested === 'standard' ? '128k' : requested === 'lossless' ? 'flac' : '320k';
+  const target: LxQuality = QUALITIES.includes(requested as LxQuality) ? requested as LxQuality
+    : requested === 'standard' ? '128k' : requested === 'lossless' ? 'flac' : '320k';
   for (let index = QUALITIES.indexOf(target); index >= 0; index -= 1) {
     if (supported.includes(QUALITIES[index])) return QUALITIES[index];
   }
@@ -29,7 +30,7 @@ function trackUrl(url: string, quality: LxQuality): TrackUrl {
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('洛雪源返回了非 HTTP 地址');
   if (quality === '128k') return { url, quality: 'standard', format: '', bitrate: 128_000, size: 0 };
   if (quality === '320k') return { url, quality: 'exhigh', format: '', bitrate: 320_000, size: 0 };
-  return { url, quality: 'lossless', format: '', bitrate: null, size: 0 };
+  return { url, quality: quality === 'flac' ? 'lossless' : quality, format: '', bitrate: null, size: 0 };
 }
 
 function parseBody(raw: Buffer): unknown {
@@ -48,7 +49,7 @@ function request(
   const headers = new Headers(options.headers || {});
   let body = options.body;
   if (body === undefined && options.form) {
-    body = new URLSearchParams(Object.entries(options.form).map(([key, value]) => [key, String(value)]));
+    body = new URLSearchParams(Object.entries(options.form).map(([key, value]): [string, string] => [key, String(value)]));
     if (!headers.has('content-type')) headers.set('content-type', 'application/x-www-form-urlencoded');
   } else if (body === undefined && options.formData) {
     const formData = new FormData();
@@ -149,15 +150,39 @@ export class CloudflareLxSourceManager implements AppLxSourceManager {
   }
 
   start(): void {}
+  getQualityOptions(platform: MusicPlatform) {
+    const supported = this.capabilities[platform === 'qq' ? 'tx' : 'wy']?.qualities || [];
+    const labels = { flac24bit: '24 位无损', hires: 'Hi-Res 高解析', master: '母带' };
+    return (Object.keys(labels) as (keyof typeof labels)[])
+      .filter((key) => supported.includes(key)).map((key) => ({ key, label: labels[key] }));
+  }
   reconcileAccountSources(): void {}
   async updateAll(): Promise<void> {}
   async stop(): Promise<void> {}
 
   async resolveTrackUrl(platform: MusicPlatform, id: string, requestedQuality?: string): Promise<TrackUrl | undefined> {
+    const supported = this.capabilities[platform === 'qq' ? 'tx' : 'wy']?.qualities || [];
+    const selected = selectQuality(requestedQuality, supported);
+    if (!selected) return undefined;
+    const candidates = QUALITIES.slice(0, QUALITIES.indexOf(selected) + 1).reverse()
+      .filter((quality) => supported.includes(quality));
+    const deadline = Date.now() + 15_000;
+    for (const quality of candidates) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      try {
+        const result = await this.resolveQuality(platform, id, quality, remaining);
+        if (result) return result;
+      } catch {
+        // Try a lower supported quality; never log private source URLs.
+      }
+    }
+    return undefined;
+  }
+
+  private async resolveQuality(platform: MusicPlatform, id: string, quality: LxQuality, timeoutMs: number): Promise<TrackUrl | undefined> {
     if (!this.requestHandler) return undefined;
     const source: LxPlatform = platform === 'qq' ? 'tx' : 'wy';
-    const quality = selectQuality(requestedQuality, this.capabilities[source]?.qualities || []);
-    if (!quality) return undefined;
     const invocation = Promise.resolve(this.requestHandler({
       source,
       action: 'musicUrl',
@@ -178,7 +203,7 @@ export class CloudflareLxSourceManager implements AppLxSourceManager {
       result = await Promise.race([
         invocation,
         new Promise<never>((_resolve, reject) => {
-          timeout = setTimeout(() => reject(new Error('洛雪源请求超时')), 15_000);
+          timeout = setTimeout(() => reject(new Error('洛雪源请求超时')), timeoutMs);
         })
       ]);
     } finally {
