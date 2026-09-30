@@ -29,6 +29,13 @@ function trackUrl(url: string, quality: LxQuality): TrackUrl {
   if (url.length > 2048) throw new Error('洛雪源返回的地址过长');
   const parsed = new URL(url);
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('洛雪源返回了非 HTTP 地址');
+  // This CDN serves identical signed files over TLS. Prefer HTTPS for both
+  // Worker metadata requests and iOS playback; do not rewrite arbitrary hosts.
+  if (parsed.protocol === 'http:' && parsed.hostname === 'aqqmusic.tc.qq.com'
+    && /^\/[A-Za-z0-9]+\.(flac|mp3|m4a)$/.test(parsed.pathname)) {
+    parsed.protocol = 'https:';
+    url = parsed.toString();
+  }
   if (quality === '128k') return { url, quality: 'standard', format: '', bitrate: 128_000, size: 0 };
   if (quality === '320k') return { url, quality: 'exhigh', format: '', bitrate: 320_000, size: 0 };
   return { url, quality: quality === 'flac' ? 'lossless' : quality, format: '', bitrate: null, size: 0 };
