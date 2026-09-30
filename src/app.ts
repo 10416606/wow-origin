@@ -14,7 +14,7 @@ import { createLoginRefreshScheduler, ensureQQLoginFresh } from './loginRefresh'
 import { createLxSourceUpdateScheduler } from './lx-resource/scheduler';
 import { YTMusicClient } from './clients/YTMusicClient';
 import { verifyStreamRequest } from './ytmusic/stream';
-import { normalizeFragmentedMp4Stream } from './ytmusic/mp4';
+import { normalizeFragmentedMp4Stream, rebaseMp4Range, sliceByteRange } from './ytmusic/mp4';
 import type { LxSourceLifecycle, LxTrackUrlResolver } from './lx-resource/types';
 
 const Result = require('../core/Result');
@@ -169,8 +169,13 @@ class MultiPlatformServer {
         const client = new YTMusicClient(verified.account.cookie);
         const audio = await client.getRawTrackUrl(String(req.params.id), verified.quality);
         const range = req.header('range');
+        const rebaseRange = audio.format === 'm4a' ? rebaseMp4Range(range) : null;
         const headers: Record<string, string> = { 'Accept-Encoding': 'identity' };
-        if (range && /^bytes=\d*-\d*$/.test(range)) headers.Range = range;
+        if (rebaseRange) {
+          headers.Range = rebaseRange.upstreamRange;
+        } else if (range && /^bytes=\d*-\d*$/.test(range)) {
+          headers.Range = range;
+        }
         const upstream = await fetch(audio.url, {
           method: req.method === 'HEAD' ? 'HEAD' : 'GET', headers, signal: controller.signal
         });
@@ -178,11 +183,28 @@ class MultiPlatformServer {
           res.status(502).json(Result.error(`YouTube Music 音频请求失败 (${upstream.status})`, 502));
           return;
         }
-        res.status(upstream.status);
-        const isMp4Audio = upstream.headers.get('content-type')?.startsWith('audio/mp4') === true;
+        const isMp4Audio = audio.format === 'm4a';
+        const upstreamRange = /^bytes 0-\d+\/(\d+)$/.exec(upstream.headers.get('content-range') || '');
+        const totalLength = upstreamRange ? Number(upstreamRange[1]) :
+          (upstream.status === 200 ? Number(upstream.headers.get('content-length')) : NaN);
+        if (rebaseRange && (!Number.isSafeInteger(totalLength) || totalLength <= 0 ||
+          (upstream.status !== 200 && !upstreamRange))) {
+          res.status(502).json(Result.error('YouTube Music 音频范围响应无效', 502));
+          return;
+        }
+        if (rebaseRange && rebaseRange.start >= totalLength) {
+          res.status(416).set('Content-Range', `bytes */${totalLength}`).end();
+          return;
+        }
+        const responseEnd = rebaseRange ? Math.min(rebaseRange.end ?? totalLength - 1, totalLength - 1) : 0;
+        res.status(rebaseRange ? 206 : upstream.status);
         for (const key of ['content-type', 'content-length', 'content-range', 'accept-ranges']) {
           const value = upstream.headers.get(key);
           if (value) res.set(key, value);
+        }
+        if (rebaseRange) {
+          res.set('Content-Range', `bytes ${rebaseRange.start}-${responseEnd}/${totalLength}`);
+          res.set('Content-Length', String(responseEnd - rebaseRange.start + 1));
         }
         const lastModified = upstream.headers.get('last-modified');
         if (lastModified) {
@@ -209,7 +231,8 @@ class MultiPlatformServer {
         const output = startsAtZero && isMp4Audio
           ? source.pipe(normalizeFragmentedMp4Stream().on('error', handleStreamError))
           : source;
-        output.pipe(res);
+        if (rebaseRange) output.pipe(sliceByteRange(rebaseRange.start, responseEnd + 1).on('error', handleStreamError)).pipe(res);
+        else output.pipe(res);
       } catch (error) {
         if (controller.signal.aborted || res.destroyed) return;
         if (!res.headersSent) next(error);

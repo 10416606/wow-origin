@@ -1,5 +1,7 @@
 const { YTMusicClient } = require('../../../dist/clients/YTMusicClient');
 const { createStreamUrl, verifyStreamRequest } = require('../../../dist/ytmusic/stream');
+const { Readable } = require('node:stream');
+const { normalizeFragmentedMp4Stream, rebaseMp4Range, sliceByteRange } = require('../../../dist/ytmusic/mp4');
 
 function row(id, title, artist = 'Daft Punk') {
   return {
@@ -160,5 +162,39 @@ describe('YouTube Music Wow client', () => {
     expect(verifyStreamRequest([account], '22222222222', query)).toBeNull();
     expect(verifyStreamRequest([account], '11111111111', { ...query, quality: 'standard' })).toBeNull();
     expect(verifyStreamRequest([account], '11111111111', { ...query, expires: '1' })).toBeNull();
+  });
+
+  test('short format probe followed by a nonzero Range keeps the normalized MP4 header', async () => {
+    const box = (type, payload) => {
+      const header = Buffer.alloc(8);
+      header.writeUInt32BE(payload.length + 8);
+      header.write(type, 4);
+      return Buffer.concat([header, payload]);
+    };
+    const mediaHeader = Buffer.alloc(24);
+    mediaHeader.writeUInt32BE(44100, 12);
+    mediaHeader.writeUInt32BE(3 * 44100, 16);
+    const movie = box('moov', Buffer.concat([
+      box('mvex', Buffer.alloc(0)),
+      box('trak', box('mdia', box('mdhd', mediaHeader)))
+    ]));
+    const source = Buffer.concat([box('ftyp', Buffer.alloc(16)), movie, Buffer.alloc(128)]);
+    const durationOffset = 24 + 8 + 8 + 8 + 8 + 24;
+    const collect = async (start, end) => {
+      const chunks = [];
+      for await (const chunk of Readable.from([source])
+        .pipe(normalizeFragmentedMp4Stream())
+        .pipe(sliceByteRange(start, end))) chunks.push(chunk);
+      return Buffer.concat(chunks);
+    };
+
+    expect(rebaseMp4Range('bytes=0-11').upstreamRange).toBe('bytes=0-65535');
+    expect(rebaseMp4Range('bytes=12-65535').upstreamRange).toBe('bytes=0-65535');
+    const first = await collect(0, 12);
+    const rest = await collect(12, source.length);
+    const assembled = Buffer.concat([first, rest]);
+    expect(assembled.length).toBe(source.length);
+    expect(assembled.readUInt32BE(durationOffset)).toBe(0);
+    expect(source.readUInt32BE(durationOffset)).toBe(3 * 44100);
   });
 });

@@ -1,5 +1,17 @@
 import { Transform } from 'node:stream';
 
+export const MP4_INIT_BYTES = 64 * 1024;
+
+export function rebaseMp4Range(range: string | undefined): { start: number; end?: number; upstreamRange: string } | null {
+  const match = /^bytes=(\d+)-(\d*)$/.exec(range || '');
+  if (!match) return null;
+  const start = Number(match[1]);
+  const end = match[2] ? Number(match[2]) : undefined;
+  if (!Number.isSafeInteger(start) || start >= MP4_INIT_BYTES ||
+      (end !== undefined && (!Number.isSafeInteger(end) || end < start))) return null;
+  return { start, end, upstreamRange: `bytes=0-${end === undefined ? '' : Math.max(end, MP4_INIT_BYTES - 1)}` };
+}
+
 type Box = { type: string; start: number; end: number };
 
 function uint32(data: Uint8Array, offset: number): number {
@@ -59,7 +71,6 @@ export function normalizeFragmentedMp4Duration(data: Buffer): Buffer {
 
 /** Buffer only the MP4 initialization segment, then pass the remaining bytes through unchanged. */
 export function normalizeFragmentedMp4Stream(): Transform {
-  const maxInitBytes = 64 * 1024;
   let head = Buffer.alloc(0);
   let forwarded = false;
   return new Transform({
@@ -71,7 +82,7 @@ export function normalizeFragmentedMp4Stream(): Transform {
       }
       head = Buffer.concat([head, chunk]);
       const required = moovEnd(head);
-      if (head.length >= Math.min(required || maxInitBytes, maxInitBytes)) {
+      if (head.length >= Math.min(required || MP4_INIT_BYTES, MP4_INIT_BYTES)) {
         this.push(normalizeFragmentedMp4Duration(head));
         head = Buffer.alloc(0);
         forwarded = true;
@@ -80,6 +91,20 @@ export function normalizeFragmentedMp4Stream(): Transform {
     },
     flush(callback) {
       if (!forwarded && head.length) this.push(normalizeFragmentedMp4Duration(head));
+      callback();
+    }
+  });
+}
+
+/** Return only the requested absolute byte range after the MP4 header has been normalized. */
+export function sliceByteRange(start: number, endExclusive: number): Transform {
+  let offset = 0;
+  return new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      const from = Math.max(0, start - offset);
+      const to = Math.min(chunk.length, endExclusive - offset);
+      if (from < to) this.push(chunk.subarray(from, to));
+      offset += chunk.length;
       callback();
     }
   });
