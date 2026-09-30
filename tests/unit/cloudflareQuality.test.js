@@ -10,6 +10,17 @@ const { CloudflareLxSourceManager } = require('../../cloudflare/lx-manager')
 describe('Cloudflare extended LX quality', () => {
   beforeEach(() => { jest.spyOn(global, 'fetch').mockRejectedValue(new Error('metadata unavailable')) })
   afterEach(() => { delete global.lxQualityHandler; jest.useRealTimers(); jest.restoreAllMocks() })
+  test('track qualities report exact-tier size and omit unavailable master without downgrading', async () => {
+    global.lxQualityHandler = jest.fn().mockImplementation(({ info }) => info.type === 'master'
+      ? Promise.reject(new Error('unavailable')) : Promise.resolve('https://audio.test/' + info.type))
+    global.fetch.mockImplementation(async () => new Response('fLaC', {
+      status: 206, headers: { 'content-range': 'bytes 0-3/123456' }
+    }))
+    const qualities = await new CloudflareLxSourceManager().getTrackQualities('qq', 'song')
+    expect(qualities.map(q => q.key)).toEqual(['flac24bit', 'hires'])
+    expect(qualities.every(q => q.size === 123456)).toBe(true)
+    expect(global.lxQualityHandler.mock.calls.map(([r]) => r.info.type)).toEqual(['flac24bit', 'hires', 'master'])
+  })
   test('advertises declared master capability and passes master to source', async () => {
     global.lxQualityHandler = jest.fn().mockResolvedValue('https://audio.test/master.flac')
     const manager = new CloudflareLxSourceManager()
