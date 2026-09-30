@@ -1,4 +1,5 @@
 import path from 'path';
+import { Readable } from 'node:stream';
 import express, { Express, Request, Response, NextFunction } from 'express';
 import cookieParser from 'cookie-parser';
 import { createWowRouter, openApiDocument } from 'aduoer-wow-sdk';
@@ -11,6 +12,8 @@ import { createLoginRouter } from './login';
 import { createDashboardRouter } from './dashboard';
 import { createLoginRefreshScheduler, ensureQQLoginFresh } from './loginRefresh';
 import { createLxSourceUpdateScheduler } from './lx-resource/scheduler';
+import { YTMusicClient } from './clients/YTMusicClient';
+import { verifyStreamRequest } from './ytmusic/stream';
 import type { LxSourceLifecycle, LxTrackUrlResolver } from './lx-resource/types';
 
 const Result = require('../core/Result');
@@ -151,11 +154,59 @@ class MultiPlatformServer {
         next();
       }
     });
+    this.app!.get('/v1/ytmusic/audio/:id', async (req: Request, res: Response, next: NextFunction) => {
+      const verified = verifyStreamRequest(this.accountSessions.sessions, String(req.params.id), req.query);
+      if (!verified) {
+        res.status(403).json(Result.error('音频链接无效或已过期', 403));
+        return;
+      }
+      const controller = new AbortController();
+      res.once('close', () => {
+        if (!res.writableEnded) controller.abort();
+      });
+      try {
+        const client = new YTMusicClient(verified.account.cookie);
+        const audio = await client.getRawTrackUrl(String(req.params.id), verified.quality);
+        const range = req.header('range');
+        const headers: Record<string, string> = {};
+        if (range && /^bytes=\d*-\d*$/.test(range)) headers.Range = range;
+        const upstream = await fetch(audio.url, {
+          method: req.method === 'HEAD' ? 'HEAD' : 'GET', headers, signal: controller.signal
+        });
+        if (!upstream.ok || (req.method !== 'HEAD' && !upstream.body)) {
+          res.status(502).json(Result.error(`YouTube Music 音频请求失败 (${upstream.status})`, 502));
+          return;
+        }
+        res.status(upstream.status);
+        for (const key of ['content-type', 'content-length', 'content-range', 'accept-ranges', 'etag', 'last-modified']) {
+          const value = upstream.headers.get(key);
+          if (value) res.set(key, value);
+        }
+        res.set('Cache-Control', 'private, no-store');
+        if (req.method === 'HEAD') {
+          res.end();
+          return;
+        }
+        Readable.fromWeb(upstream.body as any).on('error', (error: Error) => {
+          if (controller.signal.aborted && error.name === 'AbortError') return;
+          this.logger.error('YouTube Music audio stream failed', error);
+          if (!res.destroyed) res.destroy(error);
+        }).pipe(res);
+      } catch (error) {
+        if (controller.signal.aborted || res.destroyed) return;
+        if (!res.headersSent) next(error);
+        else res.destroy(error as Error);
+      }
+    });
     this.app!.use(createWowRouter({
       resolveContext: createWowContextResolver(this.accountSessions, this.lxSourceManager),
       onError: (error, request) => this.logger.error('Wow v1 request failed', error, { url: request.url })
     }));
-    if (this.preload) await preloadData(platformFactory, this.accountSessions, this.lxSourceManager);
+    if (this.preload) {
+      void preloadData(platformFactory, this.accountSessions, this.lxSourceManager).catch((error) => {
+        this.logger.error('Background favorites preload failed', error);
+      });
+    }
 
     const resourceRoutes: string[] = platformFactory
       .getAvailableRoutes()

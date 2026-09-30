@@ -2,10 +2,12 @@ import type { ResolveWowContext, TrackUrl } from 'aduoer-wow-sdk';
 import { type AccountSessionRegistry, type MusicAccountSession, extractAuthorizationToken } from './accounts';
 import { NeteaseClient } from './clients/NeteaseClient';
 import { QQClient } from './clients/QQClient';
+import { YTMusicClient } from './clients/YTMusicClient';
 import { getQualityOptions } from './quality';
 import { collectionStatusNeeded } from './collectionStatus';
 import type { MusicPlatform } from './types';
 import type { LxTrackUrlResolver } from './lx-resource';
+import { createStreamUrl } from './ytmusic/stream';
 
 /** 根据私有平台账号创建符合公开 SDK 契约的 Adapter。 */
 export function createMusicClient(
@@ -15,8 +17,10 @@ export function createMusicClient(
   favoriteArtistIds?: Set<string>,
   favoriteAlbumIds?: Set<string>,
   userPlaylistIds?: Set<string>
-): QQClient | NeteaseClient {
-  return platform === 'qq'
+): QQClient | NeteaseClient | YTMusicClient {
+  return platform === 'ytmusic'
+    ? new YTMusicClient(cookie, favoriteTrackIds, favoriteArtistIds, favoriteAlbumIds, userPlaylistIds)
+    : platform === 'qq'
     ? new QQClient(cookie, favoriteTrackIds, favoriteArtistIds, favoriteAlbumIds, userPlaylistIds)
     : new NeteaseClient(cookie, favoriteTrackIds, favoriteArtistIds, favoriteAlbumIds, userPlaylistIds);
 }
@@ -33,9 +37,13 @@ function hasValidAudioUrl(trackUrl: TrackUrl | undefined): trackUrl is TrackUrl 
 
 export function createAdapter(
   account: MusicAccountSession,
-  lxTrackUrlResolver?: LxTrackUrlResolver
-): QQClient | NeteaseClient {
+  lxTrackUrlResolver?: LxTrackUrlResolver,
+  streamOrigin?: string
+): QQClient | NeteaseClient | YTMusicClient {
   const client = createMusicClient(account.platform, account.cookie, account.favoriteTrackIds, account.favoriteArtistIds, account.favoriteAlbumIds, account.userPlaylistIds);
+  if (client instanceof YTMusicClient && streamOrigin) {
+    client.setStreamUrl((id, quality) => createStreamUrl(streamOrigin, account, id, quality));
+  }
   const userArtists = client.userArtists.bind(client);
   client.userArtists = async () => {
     const artists = await userArtists();
@@ -48,7 +56,7 @@ export function createAdapter(
     account.favoriteAlbumsLoaded = true;
     return albums;
   };
-  if (account.useLuoxue === false || !lxTrackUrlResolver) return client;
+  if (account.platform === 'ytmusic' || account.useLuoxue === false || !lxTrackUrlResolver) return client;
 
   const defaultGetTrackUrl = client.getTrackUrl.bind(client);
   const getLxTrackUrl = async (id: string, quality?: string): Promise<TrackUrl | undefined> => {
@@ -84,7 +92,13 @@ export function createWowContextResolver(
     const account = token ? registry.byAccessKey.get(token) : undefined;
     if (!account) return null;
 
-    const adapter = createAdapter(account, lxTrackUrlResolver);
+    const header = (name: string): string | undefined =>
+      typeof request?.header === 'function' ? request.header(name) : undefined;
+    const forwardedProtocol = String(header('x-forwarded-proto') || '').split(',')[0];
+    const protocol = forwardedProtocol === 'https' ? 'https' : request?.protocol === 'https' ? 'https' : 'http';
+    const host = header('host');
+    const origin = host && /^[a-zA-Z0-9.:-]+$/.test(host) ? `${protocol}://${host}` : undefined;
+    const adapter = createAdapter(account, lxTrackUrlResolver, origin);
     const needed = collectionStatusNeeded(request?.path || '');
     if (needed.artists && !account.favoriteArtistsLoaded) {
       try {

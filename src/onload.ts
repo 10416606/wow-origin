@@ -1,11 +1,14 @@
 import { QQClient } from './clients/QQClient';
 import { NeteaseClient } from './clients/NeteaseClient';
+import { YTMusicClient } from './clients/YTMusicClient';
 import type { AccountSessionRegistry, MusicAccountSession } from './accounts';
 import type { LxSourceLifecycle } from './lx-resource';
 
 export async function preloadSessionFavorites(session: MusicAccountSession): Promise<void> {
   if (!session.cookie.trim()) return;
-  const client = session.platform === 'netease'
+  const client = session.platform === 'ytmusic'
+    ? new YTMusicClient(session.cookie, session.favoriteTrackIds, session.favoriteArtistIds, session.favoriteAlbumIds, session.userPlaylistIds)
+    : session.platform === 'netease'
     ? new NeteaseClient(session.cookie, session.favoriteTrackIds, session.favoriteArtistIds, session.favoriteAlbumIds, session.userPlaylistIds)
     : new QQClient(session.cookie, session.favoriteTrackIds, session.favoriteArtistIds, session.favoriteAlbumIds, session.userPlaylistIds);
 
@@ -32,7 +35,5 @@ export async function preloadData(
   // 洛雪源必须后台加载，不能延迟 HTTP 服务启动。
   lxSourceLifecycle?.start();
 
-  for (const session of registry?.sessions || []) {
-    await preloadSessionFavorites(session);
-  }
+  await Promise.all((registry?.sessions || []).map((session) => preloadSessionFavorites(session)));
 }

@@ -30,6 +30,12 @@ const PLATFORM_QUALITY_CONFIGS: Record<MusicPlatform, PlatformQualityConfig> = {
       { key: 'exhigh', label: '极高 HQ', rank: 30, bitrate: 320000, sourceField: 'h' },
       { key: 'lossless', label: '无损 SQ', rank: 40, sourceField: 'sq' }
     ]
+  },
+  ytmusic: {
+    qualities: [
+      { key: 'standard', label: '标准', rank: 10, format: 'm4a' },
+      { key: 'higher', label: '高品质', rank: 20, format: 'm4a' }
+    ]
   }
 };
 

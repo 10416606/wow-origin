@@ -113,7 +113,7 @@ export async function refreshLoginSessions({
   logger = new Logger({ component: 'login-refresh' }),
   platform: selectedPlatform
 }: LoginRefreshOptions): Promise<LoginRefreshSummary> {
-  const sessions = registry.sessions.filter((session) => session.cookie.trim() && (!selectedPlatform || session.platform === selectedPlatform));
+  const sessions = registry.sessions.filter((session) => session.platform !== 'ytmusic' && session.cookie.trim() && (!selectedPlatform || session.platform === selectedPlatform));
   const summary: LoginRefreshSummary = {
     total: sessions.length,
     refreshed: 0,

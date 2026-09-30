@@ -13,6 +13,7 @@ import type { MusicPlatform } from './types';
 import { BadRequestError, UpstreamError } from './errors';
 import { qrCodeDataUrl } from './qr';
 import { preloadSessionFavorites } from './onload';
+import { YTMusicClient } from './clients/YTMusicClient';
 
 type ResourcePlatform = 'netease' | 'qqmusic';
 type LoginMode = 'create' | 'update';
@@ -47,10 +48,12 @@ function normalizeLoginPlatform(value: unknown): MusicPlatform {
   const platform = String(value || '').trim().toLowerCase();
   if (platform === 'qq' || platform === 'qqmusic') return 'qq';
   if (platform === 'netease') return 'netease';
+  if (platform === 'ytmusic' || platform === 'youtube-music') return 'ytmusic';
   throw new BadRequestError('不支持的平台');
 }
 
 function toResourcePlatform(platform: MusicPlatform): ResourcePlatform {
+  if (platform === 'ytmusic') throw new BadRequestError('YouTube Music 仅支持 Cookie 登录');
   return platform === 'qq' ? 'qqmusic' : 'netease';
 }
 
@@ -141,6 +144,7 @@ async function resolveLoggedInAccountName(
   platformFactory: PlatformFactoryLike
 ): Promise<string> {
   try {
+    if (platform === 'ytmusic') return (await new YTMusicClient(cookie).getUserMe()).nickname;
     const result = await callLoginModule(platformFactory, platform, 'user/detail', parseLoginCookie(cookie));
     const profile = result.body || result;
     return String(profile.nickname || '').trim();
@@ -165,6 +169,10 @@ function normalizeManualCookie(platform: MusicPlatform, value: unknown): Record<
     cookies.uin = (cookies.qqmusic_uin || cookies.musicid || cookies.uin || '').replace(/^o0*/, '');
     cookies.qm_keyst = cookies.qqmusic_key || cookies.musickey || cookies.qm_keyst || '';
     if (!/^[1-9]\d*$/.test(cookies.uin) || !cookies.qm_keyst) throw new BadRequestError('QQ Cookie 缺少账号 ID 或登录凭证');
+  } else if (platform === 'ytmusic') {
+    if (!cookies['__Secure-3PAPISID'] && !cookies.SAPISID) {
+      throw new BadRequestError('YouTube Music Cookie 缺少 __Secure-3PAPISID');
+    }
   } else if (!cookies.MUSIC_U) throw new BadRequestError('网易云 Cookie 缺少 MUSIC_U');
   return cookies;
 }
@@ -297,8 +305,8 @@ export function createLoginRouter({
       const result = updateAccountConfigByAccessKey(session.apiAccessKey, {
         name: req.body?.name,
         stateless: req.body?.stateless,
-        useLuoxue: req.body?.useLuoxue,
-        lxSource: allowAccountLxSources ? req.body?.lxSource : []
+        useLuoxue: session.platform === 'ytmusic' ? false : req.body?.useLuoxue,
+        lxSource: session.platform === 'ytmusic' ? [] : allowAccountLxSources ? req.body?.lxSource : []
       }, registry, storage);
       onAccountsChanged?.();
       res.json({ code: 200, data: { ...accountData(result.session, allowAccountLxSources), message: '配置已保存' } });
@@ -310,6 +318,7 @@ export function createLoginRouter({
   router.post('/api/start', async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { mode, platform, apiAccessKey } = loginTarget(req.body);
+      if (platform === 'ytmusic') throw new BadRequestError('YouTube Music 请使用 Cookie 登录');
 
       const result = await callLoginModule(platformFactory, platform, 'login/qr/key');
       const qr = getQrPayload(platform, result);
@@ -373,6 +382,12 @@ export function createLoginRouter({
     try {
       const target = loginTarget(req.body);
       const values = normalizeManualCookie(target.platform, req.body?.cookie);
+      if (target.platform === 'ytmusic') {
+        const cookie = serializeCookie(values);
+        const profile = await new YTMusicClient(cookie).getUserMe();
+        res.json({ code: 200, data: await saveLogin(target, cookie, profile.nickname) });
+        return;
+      }
       const result = await callLoginModule(platformFactory, target.platform,
         target.platform === 'qq' ? 'login/cookie' : 'user/detail', values);
       const profile = result.body || result;

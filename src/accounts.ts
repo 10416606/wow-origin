@@ -85,6 +85,7 @@ export function normalizeAccountPlatform(value: unknown): MusicPlatform {
   const platform = String(value || '').trim().toLowerCase();
   if (platform === 'qq') return 'qq';
   if (platform === 'netease') return 'netease';
+  if (platform === 'ytmusic' || platform === 'youtube-music') return 'ytmusic';
   throw new Error(`不支持的平台: ${platform || '<empty>'}`);
 }
 
@@ -241,7 +242,9 @@ export function loadAccountSessions(storeInput: AccountStoreInput = process.cwd(
       const platform = normalizeAccountPlatform(account.platform);
       const accountName = String(account.name || `${platform}-${index + 1}`).trim();
       const stateless = normalizeAccountStateless(account.stateless);
-      const useLuoxue = normalizeAccountUseLuoxue(account.useLuoxue);
+      const useLuoxue = platform === 'ytmusic' && account.useLuoxue === undefined
+        ? { value: false, invalid: false }
+        : normalizeAccountUseLuoxue(account.useLuoxue);
       if (useLuoxue.invalid) {
         console.warn(
           `[accounts] 账号 "${accountName}" 的 useLuoxue 必须是 boolean，已按 false 处理`
@@ -374,14 +377,14 @@ export function createAccountWithCookie(
   }
 
   const normalizedName = String(accountName || '').trim()
-    || (platform === 'qq' ? 'QQ 音乐' : '网易云音乐');
+    || (platform === 'qq' ? 'QQ 音乐' : platform === 'ytmusic' ? 'YouTube Music' : '网易云音乐');
   const account: RawMusicAccount = {
     platform,
     name: normalizedName,
     cookie: normalizedCookie,
     api_access_key: token,
     stateless: false,
-    useLuoxue: true,
+    useLuoxue: platform !== 'ytmusic',
     lxSource: []
   };
   store.insert(account);
@@ -392,7 +395,7 @@ export function createAccountWithCookie(
     cookie: normalizedCookie,
     apiAccessKey: token,
     stateless: false,
-    useLuoxue: true,
+    useLuoxue: platform !== 'ytmusic',
     lxSource: [],
     favoriteTrackIds: new Set<string>(),
     userPlaylistIds: new Set<string>(),
