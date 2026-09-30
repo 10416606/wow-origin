@@ -105,6 +105,13 @@ describe('Cloudflare extended LX quality', () => {
     expect((await new CloudflareLxSourceManager().resolveTrackUrl('qq', 'song', 'master')).quality).toBe('master')
     expect(global.fetch).not.toHaveBeenCalled()
   })
+  test('QQ domain audio uses HTTPS and preserves the signed path and query', async () => {
+    global.lxQualityHandler = jest.fn().mockResolvedValue('http://aqqmusic.tc.qq.com/AI001test.flac?vkey=test&uin=123')
+    global.fetch.mockResolvedValue(new Response('fLaC', { status: 206,
+      headers: { 'content-range': 'bytes 0-3/227033211' } }))
+    expect(await new CloudflareLxSourceManager().resolveTrackUrl('qq', 'song', 'master'))
+      .toMatchObject({ url: 'https://aqqmusic.tc.qq.com/AI001test.flac?vkey=test&uin=123', quality: 'master', size: 227033211 })
+  })
   test('source response after five seconds is accepted instead of prematurely downgraded', async () => {
     jest.useFakeTimers()
     global.lxQualityHandler = jest.fn().mockImplementation(() => new Promise(resolve =>
