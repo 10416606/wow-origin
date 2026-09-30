@@ -3,6 +3,7 @@ import type {
   PlaylistDetail, PlaylistPage, SearchSuggest, ToplistGroup, Track, TrackLyrics, TrackPage,
   TrackUrl, UserProfile, WowAdapter
 } from 'aduoer-wow-sdk';
+import { createHash } from 'node:crypto';
 import { BadRequestError, NotFoundError, UnplayableError, UpstreamError } from '../errors';
 import { YTMusicApi } from '../ytmusic/api';
 import { at, continuation, findAll, mapAlbum, mapArtist, mapPlaylist, mapTrack, rows, text, thumbnail, tiles } from '../ytmusic/parse';
@@ -13,6 +14,20 @@ const SEARCH_PARAMS: Record<string, string> = {
   albums: 'EgWKAQIYAWoMEA4QChADEAQQCRAF',
   playlists: 'Eg-KAQwIABAAGAAgACgBMABqChAEEAMQCRAFEAo%3D'
 };
+
+const rawTrackUrlCache = new Map<string, { value: TrackUrl; expiresAt: number }>();
+const rawTrackUrlRequests = new Map<string, Promise<TrackUrl>>();
+
+function rawTrackCacheKey(cookie: string, id: string, quality: string): string {
+  return `${createHash('sha256').update(cookie).digest('hex')}:${id}:${quality}`;
+}
+
+function rawTrackCacheExpiry(url: string): number {
+  const now = Date.now();
+  const upstreamExpiry = Number(new URL(url).searchParams.get('expire')) * 1000;
+  return Math.min(now + 30 * 60_000,
+    Number.isFinite(upstreamExpiry) && upstreamExpiry > 0 ? upstreamExpiry - 5 * 60_000 : now + 5 * 60_000);
+}
 
 function page<T>(items: T[], offset: number, limit: number, hasMore: boolean) {
   return { items: items.slice(offset, offset + limit), offset, limit, hasMore };
@@ -188,35 +203,57 @@ export class YTMusicClient implements WowAdapter {
   }
 
   async getTrackDetail(id: string): Promise<Track> {
-    const response = await this.api.player(id);
+    const [response, musicResponse] = await Promise.all([
+      this.api.player(id),
+      this.api.request('next', { videoId: id, isAudioOnly: true }).catch(() => null)
+    ]);
     const details = response.videoDetails;
     if (!details) throw new NotFoundError('YouTube Music 歌曲不存在');
+    const musicTrack = findAll(musicResponse, 'playlistPanelVideoRenderer')
+      .find((row) => row.videoId === id);
     return this.withTrack(mapTrack({
       videoId: id,
       title: details.title,
       author: details.author,
       channelId: details.channelId,
       duration_seconds: Number(details.lengthSeconds),
-      thumbnails: details.thumbnail?.thumbnails || []
+      thumbnails: musicTrack?.thumbnail?.thumbnails || []
     }));
   }
 
   async getRawTrackUrl(id: string, quality = 'higher'): Promise<TrackUrl> {
-    const response = await this.api.player(id);
-    const formats = (response.streamingData?.adaptiveFormats || [])
-      .filter((format: any) => format.url && String(format.mimeType || '').startsWith('audio/mp4'))
-      .sort((left: any, right: any) => Number(left.bitrate || 0) - Number(right.bitrate || 0));
-    if (!formats.length) {
-      throw new UnplayableError(response.playabilityStatus?.reason || 'YouTube Music 未返回可播放的音频地址');
-    }
-    const selected = quality === 'min' || quality === 'standard' ? formats[0] : formats[formats.length - 1];
-    return {
-      url: selected.url,
-      quality: quality === 'min' || quality === 'standard' ? 'standard' : 'higher',
-      format: 'm4a',
-      bitrate: Number(selected.bitrate) || null,
-      size: Number(selected.contentLength) || 0
-    };
+    const key = rawTrackCacheKey(this.cookie, id, quality);
+    const cached = rawTrackUrlCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
+    const inFlight = rawTrackUrlRequests.get(key);
+    if (inFlight) return inFlight;
+
+    const request = (async () => {
+      const response = await this.api.player(id);
+      const formats = (response.streamingData?.adaptiveFormats || [])
+        .filter((format: any) => format.url && String(format.mimeType || '').startsWith('audio/mp4'))
+        .sort((left: any, right: any) => Number(left.bitrate || 0) - Number(right.bitrate || 0));
+      if (!formats.length) {
+        throw new UnplayableError(response.playabilityStatus?.reason || 'YouTube Music 未返回可播放的音频地址');
+      }
+      const selected = quality === 'min' || quality === 'standard' ? formats[0] : formats[formats.length - 1];
+      const result: TrackUrl = {
+        url: selected.url,
+        quality: quality === 'min' || quality === 'standard' ? 'standard' : 'higher',
+        format: 'm4a',
+        bitrate: Number(selected.bitrate) || null,
+        size: Number(selected.contentLength) || 0
+      };
+      const expiresAt = rawTrackCacheExpiry(result.url);
+      if (expiresAt > Date.now()) {
+        rawTrackUrlCache.set(key, { value: result, expiresAt });
+        if (rawTrackUrlCache.size > 256) rawTrackUrlCache.delete(rawTrackUrlCache.keys().next().value!);
+      }
+      return result;
+    })();
+    rawTrackUrlRequests.set(key, request);
+    try { return await request; }
+    finally { rawTrackUrlRequests.delete(key); }
   }
 
   async getTrackUrl(id: string, quality = 'higher'): Promise<TrackUrl> {

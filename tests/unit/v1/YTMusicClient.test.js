@@ -68,6 +68,33 @@ describe('YouTube Music Wow client', () => {
     });
   });
 
+  test('track detail uses square Music artwork instead of the video thumbnail', async () => {
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('/watch?')) {
+        return { ok: true, text: async () => '<script>"VISITOR_DATA":"visitor-for-test"</script>' };
+      }
+      if (String(url).includes('/youtubei/v1/player')) {
+        return mockResponse({ videoDetails: {
+          title: 'Song', author: 'Artist', lengthSeconds: '180',
+          thumbnail: { thumbnails: [{ url: 'https://i.ytimg.com/video.jpg', width: 1280, height: 720 }] }
+        } });
+      }
+      return mockResponse({ contents: { playlistPanelVideoRenderer: {
+        videoId: '11111111111',
+        thumbnail: { thumbnails: [
+          { url: 'https://image.example/120.jpg', width: 120, height: 120 },
+          { url: 'https://image.example/544.jpg', width: 544, height: 544 }
+        ] }
+      } } });
+    });
+
+    const detail = await new YTMusicClient('').getTrackDetail('11111111111');
+    expect(detail).toMatchObject({
+      id: '11111111111', durationMs: 180000,
+      album: { coverUrl: 'https://image.example/544.jpg' }
+    });
+  });
+
   test('browser Cookie account request sends auth-user and Music visitor context', async () => {
     const cookie = '__Secure-3PAPISID=test-secret; SID=test-session';
     let request;

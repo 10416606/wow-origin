@@ -14,6 +14,7 @@ import { createLoginRefreshScheduler, ensureQQLoginFresh } from './loginRefresh'
 import { createLxSourceUpdateScheduler } from './lx-resource/scheduler';
 import { YTMusicClient } from './clients/YTMusicClient';
 import { verifyStreamRequest } from './ytmusic/stream';
+import { normalizeFragmentedMp4Stream } from './ytmusic/mp4';
 import type { LxSourceLifecycle, LxTrackUrlResolver } from './lx-resource/types';
 
 const Result = require('../core/Result');
@@ -168,7 +169,7 @@ class MultiPlatformServer {
         const client = new YTMusicClient(verified.account.cookie);
         const audio = await client.getRawTrackUrl(String(req.params.id), verified.quality);
         const range = req.header('range');
-        const headers: Record<string, string> = {};
+        const headers: Record<string, string> = { 'Accept-Encoding': 'identity' };
         if (range && /^bytes=\d*-\d*$/.test(range)) headers.Range = range;
         const upstream = await fetch(audio.url, {
           method: req.method === 'HEAD' ? 'HEAD' : 'GET', headers, signal: controller.signal
@@ -178,20 +179,37 @@ class MultiPlatformServer {
           return;
         }
         res.status(upstream.status);
-        for (const key of ['content-type', 'content-length', 'content-range', 'accept-ranges', 'etag', 'last-modified']) {
+        const isMp4Audio = upstream.headers.get('content-type')?.startsWith('audio/mp4') === true;
+        for (const key of ['content-type', 'content-length', 'content-range', 'accept-ranges']) {
           const value = upstream.headers.get(key);
           if (value) res.set(key, value);
         }
+        const lastModified = upstream.headers.get('last-modified');
+        if (lastModified) {
+          const parsed = Date.parse(lastModified);
+          // The normalized MP4 is a new representation; invalidate previously cached headers in Aduoer.
+          res.set('Last-Modified', isMp4Audio && Number.isFinite(parsed)
+            ? new Date(parsed + 1000).toUTCString() : lastModified);
+        }
+        const upstreamEtag = upstream.headers.get('etag');
+        if (upstreamEtag) res.set('ETag', isMp4Audio ? `W/"ytm-mdhd-v1-${upstreamEtag.replace(/[^a-zA-Z0-9]/g, '')}"` : upstreamEtag);
         res.set('Cache-Control', 'private, no-store');
         if (req.method === 'HEAD') {
           res.end();
           return;
         }
-        Readable.fromWeb(upstream.body as any).on('error', (error: Error) => {
+        const handleStreamError = (error: Error) => {
           if (controller.signal.aborted && error.name === 'AbortError') return;
           this.logger.error('YouTube Music audio stream failed', error);
           if (!res.destroyed) res.destroy(error);
-        }).pipe(res);
+        };
+        const source = Readable.fromWeb(upstream.body as any).on('error', handleStreamError);
+        const startsAtZero = upstream.status === 200 ||
+          (upstream.status === 206 && /^bytes 0-\d+\//.test(upstream.headers.get('content-range') || ''));
+        const output = startsAtZero && isMp4Audio
+          ? source.pipe(normalizeFragmentedMp4Stream().on('error', handleStreamError))
+          : source;
+        output.pipe(res);
       } catch (error) {
         if (controller.signal.aborted || res.destroyed) return;
         if (!res.headersSent) next(error);
