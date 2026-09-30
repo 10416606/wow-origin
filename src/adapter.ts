@@ -35,6 +35,18 @@ export function createAdapter(
   if (account.useLuoxue === false || !lxTrackUrlResolver) return client;
 
   const defaultGetTrackUrl = client.getTrackUrl.bind(client);
+  const defaultGetTrackDetail = client.getTrackDetail.bind(client);
+  if (lxTrackUrlResolver.getTrackQualities) {
+    client.getTrackDetail = async (id: string) => {
+      const [track, qualities] = await Promise.all([
+        defaultGetTrackDetail(id),
+        lxTrackUrlResolver.getTrackQualities!(account.platform, id).catch(() => [])
+      ]);
+      const merged = new Map((track.qualities || []).map((quality) => [quality.key, quality]));
+      for (const quality of qualities) merged.set(quality.key, quality);
+      return { ...track, qualities: [...merged.values()] };
+    };
+  }
   const getLxTrackUrl = async (id: string, quality?: string): Promise<TrackUrl | undefined> => {
     try {
       const lxTrackUrl = account.lxSource?.length
