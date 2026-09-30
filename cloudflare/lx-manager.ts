@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { isIP } from 'node:net';
 import zlib from 'node:zlib';
 import { Buffer } from 'node:buffer';
 import type { TrackUrl } from 'aduoer-wow-sdk';
@@ -37,11 +38,21 @@ class UnavailableAudioError extends Error {}
 
 // Read only a small prefix. Some CDNs ignore Range and stream the entire song.
 async function inspectAudio(track: TrackUrl, timeoutMs: number): Promise<TrackUrl> {
+  const original = new URL(track.url);
+  const directIp = isIP(original.hostname.replace(/^\[|\]$/g, '')) !== 0;
+  let probeUrl = track.url;
+  if (directIp) {
+    // Workers cannot fetch literal IPs. This QQ CDN route carries the same
+    // file name/signature as its domain form; use it only for metadata.
+    const qqFile = original.pathname.match(/^\/amobile\.music\.tc\.qq\.com\/([A-Za-z0-9]+\.flac)$/);
+    if (!qqFile) return track;
+    probeUrl = `https://aqqmusic.tc.qq.com/${qqFile[1]}${original.search}`;
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   try {
-    const response = await fetch(track.url, {
+    const response = await fetch(probeUrl, {
       headers: { Range: 'bytes=0-4095', 'Accept-Encoding': 'identity', 'User-Agent': 'Mozilla/5.0' },
       signal: controller.signal,
       redirect: 'follow'
@@ -86,7 +97,9 @@ async function inspectAudio(track: TrackUrl, timeoutMs: number): Promise<TrackUr
     if (/audio\/mp4|audio\/x-m4a/i.test(contentType)) return { ...track, format: 'm4a' };
     return track;
   } catch (error) {
-    if (error instanceof UnavailableAudioError) throw error;
+    // A rejected alternative metadata route says nothing about the original
+    // IP link's playability on the phone. Preserve that link and its tier.
+    if (error instanceof UnavailableAudioError && !directIp) throw error;
     // Missing metadata or a slow probe must not break an otherwise usable URL.
     return track;
   } finally {
@@ -219,7 +232,7 @@ export class CloudflareLxSourceManager implements AppLxSourceManager {
     const options = this.getQualityOptions(platform).filter(({ key }) => key !== 'max');
     const results = await Promise.all(options.map(async ({ key, label }) => {
       try {
-        const result = await this.resolveQuality(platform, id, key as LxQuality, 3500);
+        const result = await this.resolveQuality(platform, id, key as LxQuality, 8000);
         if (!result) return [];
         const audio = await inspectAudio(result, 6000);
         return [{ key, label, size: audio.size, format: audio.format, bitrate: audio.bitrate }];
@@ -248,12 +261,12 @@ export class CloudflareLxSourceManager implements AppLxSourceManager {
     if (!selected) return undefined;
     const candidates = QUALITIES.slice(0, QUALITIES.indexOf(selected) + 1).reverse()
       .filter((quality) => supported.includes(quality));
-    const deadline = Date.now() + 15_000;
+    const deadline = Date.now() + 25_000;
     for (const quality of candidates) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) break;
       try {
-        const result = await this.resolveQuality(platform, id, quality, Math.min(3500, remaining));
+        const result = await this.resolveQuality(platform, id, quality, Math.min(8000, remaining));
         if (result) return await inspectAudio(result, Math.min(6000, Math.max(1, deadline - Date.now())));
       } catch {
         // Try a lower supported quality; never log private source URLs.

@@ -71,7 +71,7 @@ describe('Cloudflare extended LX quality', () => {
     global.lxQualityHandler = jest.fn().mockImplementationOnce(() => new Promise(() => {}))
       .mockResolvedValue('https://audio.test/hires.flac')
     const pending = new CloudflareLxSourceManager().resolveTrackUrl('qq', 'song', 'max')
-    await jest.advanceTimersByTimeAsync(3501)
+    await jest.advanceTimersByTimeAsync(8001)
     expect(await pending).toMatchObject({ quality: 'hires' })
   })
   test('a server ignoring Range is cancelled after the header', async () => {
@@ -82,5 +82,36 @@ describe('Cloudflare extended LX quality', () => {
     global.lxQualityHandler = jest.fn().mockResolvedValue('https://audio.test/song')
     expect((await new CloudflareLxSourceManager().resolveTrackUrl('qq', 'song', 'max')).size).toBe(12345678)
     expect(cancel).toHaveBeenCalled()
+  })
+  test('QQ IP links keep their playback URL while metadata uses the domain route', async () => {
+    const url = 'http://203.0.113.1/amobile.music.tc.qq.com/AI001test.flac?vkey=test'
+    global.lxQualityHandler = jest.fn().mockResolvedValue(url)
+    global.fetch.mockResolvedValue(new Response('fLaC', { status: 206,
+      headers: { 'content-range': 'bytes 0-3/227033211' } }))
+    const result = await new CloudflareLxSourceManager().resolveTrackUrl('qq', 'song', 'master')
+    expect(result).toMatchObject({ url, quality: 'master', size: 227033211 })
+    expect(global.fetch.mock.calls[0][0]).toBe('https://aqqmusic.tc.qq.com/AI001test.flac?vkey=test')
+  })
+  test('a failed IP metadata alternative does not falsely downgrade master', async () => {
+    const url = 'http://203.0.113.1/amobile.music.tc.qq.com/AI001test.flac?vkey=test'
+    global.lxQualityHandler = jest.fn().mockResolvedValue(url)
+    global.fetch.mockResolvedValue(new Response('', { status: 403 }))
+    expect(await new CloudflareLxSourceManager().resolveTrackUrl('qq', 'song', 'master'))
+      .toMatchObject({ url, quality: 'master', size: 0 })
+    expect(global.lxQualityHandler).toHaveBeenCalledTimes(1)
+  })
+  test('unknown literal IPs are preserved without unsupported Worker fetches', async () => {
+    global.lxQualityHandler = jest.fn().mockResolvedValue('http://[2001:db8::1]/song.flac')
+    expect((await new CloudflareLxSourceManager().resolveTrackUrl('qq', 'song', 'master')).quality).toBe('master')
+    expect(global.fetch).not.toHaveBeenCalled()
+  })
+  test('source response after five seconds is accepted instead of prematurely downgraded', async () => {
+    jest.useFakeTimers()
+    global.lxQualityHandler = jest.fn().mockImplementation(() => new Promise(resolve =>
+      setTimeout(() => resolve('https://audio.test/master.flac'), 5000)))
+    const pending = new CloudflareLxSourceManager().resolveTrackUrl('qq', 'song', 'master')
+    await jest.advanceTimersByTimeAsync(5001)
+    expect((await pending).quality).toBe('master')
+    expect(global.lxQualityHandler).toHaveBeenCalledTimes(1)
   })
 })
