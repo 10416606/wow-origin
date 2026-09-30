@@ -29,6 +29,9 @@ function trackUrl(url: string, quality: LxQuality): TrackUrl {
   if (url.length > 2048) throw new Error('洛雪源返回的地址过长');
   const parsed = new URL(url);
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('洛雪源返回了非 HTTP 地址');
+  if (parsed.hostname === 'aqqmusic.tc.qq.com' && parsed.pathname === '/') {
+    throw new Error('洛雪源返回了空的音频目录');
+  }
   // This CDN serves identical signed files over TLS. Prefer HTTPS for both
   // Worker metadata requests and iOS playback; do not rewrite arbitrary hosts.
   if (parsed.protocol === 'http:' && parsed.hostname === 'aqqmusic.tc.qq.com'
@@ -66,6 +69,10 @@ async function inspectAudio(track: TrackUrl, timeoutMs: number): Promise<TrackUr
     });
     if (!response.ok) {
       void response.body?.cancel().catch(() => {});
+      // CDN authorization/geography and transient failures depend on the
+      // request's origin. The iOS client may still play this signed URL.
+      if (response.status === 401 || response.status === 403
+        || response.status === 429 || response.status >= 500) return track;
       throw new UnavailableAudioError('Audio address unavailable');
     }
     const contentType = response.headers.get('content-type') || '';
