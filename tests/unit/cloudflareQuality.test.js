@@ -60,7 +60,7 @@ describe('Cloudflare extended LX quality', () => {
       .toMatchObject({ size: 0, format: 'mp3' })
   })
   test('unplayable master URL falls back to Hi-Res', async () => {
-    global.fetch.mockResolvedValueOnce(new Response('', { status: 403 }))
+    global.fetch.mockResolvedValueOnce(new Response('', { status: 404 }))
       .mockResolvedValueOnce(new Response('fLaC', { headers: { 'content-length': '8000' } }))
     global.lxQualityHandler = jest.fn().mockResolvedValue('https://audio.test/song')
     expect(await new CloudflareLxSourceManager().resolveTrackUrl('qq', 'song', 'max'))
@@ -111,6 +111,19 @@ describe('Cloudflare extended LX quality', () => {
       headers: { 'content-range': 'bytes 0-3/227033211' } }))
     expect(await new CloudflareLxSourceManager().resolveTrackUrl('qq', 'song', 'master'))
       .toMatchObject({ url: 'https://aqqmusic.tc.qq.com/AI001test.flac?vkey=test&uin=123', quality: 'master', size: 227033211 })
+  })
+  test('CDN rejection of Worker metadata does not prove the client cannot play', async () => {
+    global.lxQualityHandler = jest.fn().mockResolvedValue('https://audio.test/master.flac')
+    global.fetch.mockResolvedValue(new Response('', { status: 403 }))
+    expect(await new CloudflareLxSourceManager().resolveTrackUrl('qq', 'song', 'master'))
+      .toMatchObject({ quality: 'master', size: 0 })
+    expect(global.lxQualityHandler).toHaveBeenCalledTimes(1)
+  })
+  test('empty QQ CDN directory is rejected before probing and falls back', async () => {
+    global.lxQualityHandler = jest.fn().mockResolvedValueOnce('https://aqqmusic.tc.qq.com/')
+      .mockResolvedValue('https://audio.test/hires.flac')
+    expect((await new CloudflareLxSourceManager().resolveTrackUrl('qq', 'song', 'master')).quality).toBe('hires')
+    expect(global.fetch).toHaveBeenCalledTimes(1)
   })
   test('source response after five seconds is accepted instead of prematurely downgraded', async () => {
     jest.useFakeTimers()
