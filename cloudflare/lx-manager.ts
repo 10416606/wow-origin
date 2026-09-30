@@ -69,6 +69,23 @@ async function inspectAudio(track: TrackUrl, timeoutMs: number): Promise<TrackUr
     });
     if (!response.ok) {
       void response.body?.cancel().catch(() => {});
+      // Some CDNs treat a byte-range GET differently from a metadata HEAD.
+      // Log only the host and status, never the signed URL or account values.
+      console.info('[audio-metadata]', JSON.stringify({ method: 'GET', host: new URL(probeUrl).hostname,
+        status: response.status, server: response.headers.get('server')?.slice(0, 64) }));
+      if (response.status === 403) {
+        const head = await fetch(probeUrl, {
+          method: 'HEAD', headers: { 'Accept-Encoding': 'identity', 'User-Agent': 'Mozilla/5.0' },
+          signal: controller.signal, redirect: 'follow'
+        });
+        console.info('[audio-metadata]', JSON.stringify({ method: 'HEAD', host: new URL(probeUrl).hostname,
+          status: head.status, server: head.headers.get('server')?.slice(0, 64) }));
+        void head.body?.cancel().catch(() => {});
+        const size = Number(head.headers.get('content-length'));
+        if (head.status === 200 && !head.headers.get('content-encoding')
+          && !/text\/html|application\/json/i.test(head.headers.get('content-type') || '')
+          && Number.isSafeInteger(size) && size > 0) return { ...track, size };
+      }
       // CDN authorization/geography and transient failures depend on the
       // request's origin. The iOS client may still play this signed URL.
       if (response.status === 401 || response.status === 403
