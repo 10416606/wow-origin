@@ -213,6 +213,22 @@ export class CloudflareLxSourceManager implements AppLxSourceManager {
   }
 
   start(): void {}
+  // Only advertise a per-track tier after resolving that exact tier. A fallback
+  // must not be presented as an available master/Hi-Res file.
+  async getTrackQualities(platform: MusicPlatform, id: string): Promise<import('aduoer-wow-sdk').Quality[]> {
+    const options = this.getQualityOptions(platform).filter(({ key }) => key !== 'max');
+    const results = await Promise.all(options.map(async ({ key, label }) => {
+      try {
+        const result = await this.resolveQuality(platform, id, key as LxQuality, 3500);
+        if (!result) return [];
+        const audio = await inspectAudio(result, 6000);
+        return [{ key, label, size: audio.size, format: audio.format, bitrate: audio.bitrate }];
+      } catch {
+        return [];
+      }
+    }));
+    return results.flat();
+  }
   getQualityOptions(platform: MusicPlatform) {
     const supported = this.capabilities[platform === 'qq' ? 'tx' : 'wy']?.qualities || [];
     const labels = { flac24bit: '24 位无损', hires: 'Hi-Res 高解析', master: '母带' };
