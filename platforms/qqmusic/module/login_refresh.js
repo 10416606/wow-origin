@@ -1,6 +1,6 @@
-const { loginCgi, credentialCookies, loginError } = require('../util/login-http')
+const { credentialCookies, loginError } = require('../util/login-http')
+const { getAndroidLoginContext, encodeIdentity } = require('../util/android-login')
 const validateCookie = require('./login_cookie')
-const { hash33 } = require('../util/qq-login')
 
 module.exports = async (query) => {
   const musicid = String(query.musicid || query.uin || '').replace(/^o/, '')
@@ -25,18 +25,15 @@ module.exports = async (query) => {
           ...shared, access_token: query.access_token || '', expired_in: Number(query.expired_at) || 0,
           musicid: Number(musicid), str_musicid: musicid, unionid: query.unionid || '',
         }
-  const gTk = hash33(musickey, 5381)
-  const result = await loginCgi('music.login.LoginServer', 'Login', param, {
-    ct: 24, cv: 4747474, platform: 'yqq.json', chid: '0',
-    uin: Number(musicid), g_tk: gTk, g_tk_new_20200303: gTk,
-    format: 'json', inCharset: 'utf-8', outCharset: 'utf-8', notice: 0, needNewCode: 1,
-    tmeLoginType: loginType,
-  })
+  const android = getAndroidLoginContext(musicid, query.qq_android_identity, { requireExisting: true })
+  const result = await android.androidLoginCgi('music.login.LoginServer', 'Login', param, {
+    musicid, musickey, loginType,
+  }, { tmeLoginType: loginType })
   if (result.code !== 0) {
     // Some valid sessions cannot refresh yet. Check the old credential before retaining it.
     if (result.code !== 20279) throw loginError(result.code)
     await validateCookie({ uin: musicid, qm_keyst: musickey })
     return { refreshed: false }
   }
-  return { cookie: credentialCookies({ loginType, ...result.data }), refreshed: true }
+  return { cookie: credentialCookies({ loginType, ...result.data }), androidIdentity: encodeIdentity(android), refreshed: true }
 }

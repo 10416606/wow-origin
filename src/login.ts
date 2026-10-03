@@ -15,6 +15,8 @@ import { qrCodeDataUrl } from './qr';
 import { preloadSessionFavorites } from './onload';
 import { YTMusicClient } from './clients/YTMusicClient';
 
+const { deviceIdFromIdentity } = require('../platforms/qqmusic/util/android-login');
+
 type ResourcePlatform = 'netease' | 'qqmusic';
 type LoginMode = 'create' | 'update';
 
@@ -130,6 +132,16 @@ function accountData(session: MusicAccountSession, allowAccountLxSources: boolea
     useLuoxue: session.useLuoxue,
     lxSource: allowAccountLxSources ? session.lxSource : []
   };
+}
+
+function existingQqDeviceQuery(session?: MusicAccountSession): Record<string, string> {
+  if (!session) return {};
+  if (!session.deviceId && !session.deviceState) return {};
+  const storedId = deviceIdFromIdentity(session.deviceState);
+  if (!storedId || (session.deviceId && session.deviceId !== storedId)) {
+    throw new BadRequestError('QQ 账号已有 deviceId，但设备状态缺失或不匹配，请修复设备记录');
+  }
+  return { qq_android_identity: session.deviceState! };
 }
 
 function sendLoginPage(_req: Request, res: Response): void {
@@ -320,7 +332,9 @@ export function createLoginRouter({
       const { mode, platform, apiAccessKey } = loginTarget(req.body);
       if (platform === 'ytmusic') throw new BadRequestError('YouTube Music 请使用 Cookie 登录');
 
-      const result = await callLoginModule(platformFactory, platform, 'login/qr/key');
+      const existing = mode === 'update' ? registry.byAccessKey.get(apiAccessKey) : undefined;
+      const result = await callLoginModule(platformFactory, platform, 'login/qr/key',
+        platform === 'qq' ? existingQqDeviceQuery(existing) : {});
       const qr = getQrPayload(platform, result);
       const qrImage = qr.qrImage || (qr.qrText
         ? qrCodeDataUrl(qr.qrText)
@@ -410,7 +424,11 @@ export function createLoginRouter({
         }
         target = previous;
       }
-      const result = await callLoginModule(platformFactory, target.platform, 'login/phone/send', { phone, countryCode, token });
+      const existing = target.mode === 'update' ? registry.byAccessKey.get(target.apiAccessKey) : undefined;
+      const result = await callLoginModule(platformFactory, target.platform, 'login/phone/send', {
+        phone, countryCode, token,
+        ...(target.platform === 'qq' ? existingQqDeviceQuery(existing) : {})
+      });
       const data = result.body;
       if (!data || !['sent', 'captcha', 'frequency'].includes(data.status)) throw new UpstreamError('验证码发送返回无效状态');
       const sessionToken = String(data.token || token || '').trim();

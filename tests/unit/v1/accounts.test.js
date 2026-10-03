@@ -56,6 +56,21 @@ describe('v1 accounts', () => {
     expect(errorSpy).not.toHaveBeenCalled()
   })
 
+  test('扫码成功后将一次生成的 deviceId 写入数据库，重载账号仍能恢复', () => {
+    const workDir = makeWorkDir()
+    const { createAndroidLoginContext, bindAndroidLoginContext } = require('../../../platforms/qqmusic/util/android-login')
+    const context = createAndroidLoginContext()
+    bindAndroidLoginContext('987654321', context)
+    const registry = { sessions: [], byAccessKey: new Map() }
+    createAccountWithCookie('qq-device-key', 'qq', 'uin=987654321; qm_keyst=masked', registry, workDir, 'QQ')
+
+    const stored = readAccounts(workDir)[0]
+    expect(stored.deviceId).toBe(context.snapshot().device.androidId)
+    expect(stored.deviceState).toEqual(expect.any(String))
+    expect(stored.cookie).not.toContain('deviceId')
+    expect(loadAccountSessions(workDir).byAccessKey.get('qq-device-key').deviceId).toBe(stored.deviceId)
+  })
+
   test('空旧文件和 JSON 迁移失败不阻止加载', () => {
     const emptyDir = makeWorkDir()
     fs.writeFileSync(path.join(emptyDir, 'data', 'accounts.json'), '')

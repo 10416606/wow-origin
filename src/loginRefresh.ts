@@ -136,6 +136,7 @@ export async function refreshLoginSessions({
       const result = await platform.callModule(LOGIN_REFRESH_ROUTE, {
         query: {
           ...currentCookie,
+          ...(session.deviceState ? { qq_android_identity: session.deviceState } : {}),
           platform: resourcePlatform,
           timestamp: Date.now()
         },
@@ -171,7 +172,8 @@ export async function refreshLoginSessions({
         session.platform,
         refreshedCookie,
         registry,
-        accountStore ?? workDir
+        accountStore ?? workDir,
+        typeof result.androidIdentity === 'string' ? result.androidIdentity : undefined
       );
 
       summary.refreshed += 1;

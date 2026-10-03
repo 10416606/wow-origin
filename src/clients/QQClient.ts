@@ -31,12 +31,14 @@ export function normalizeQQCredentials(cookie: string = ''): { uin: string; qm_k
 export class QQClient extends MusicClientBase {
   private readonly uin: string;
   private readonly qm_keyst: string;
+  private readonly qqLoginType: string;
 
   constructor(cookie: string, favoriteTrackSet?: Set<string>, favoriteArtistSet?: Set<string>, favoriteAlbumSet?: Set<string>, userPlaylistSet?: Set<string>) {
     super(cookie, 'qq', favoriteTrackSet, favoriteArtistSet, favoriteAlbumSet, userPlaylistSet);
     const credentials = normalizeQQCredentials(cookie);
     this.uin = credentials.uin;
     this.qm_keyst = credentials.qm_keyst;
+    this.qqLoginType = this.getCookieValue('loginType') || '2';
   }
 
   private async call(route: string, query: Record<string, any> = {}, keepEnvelope = false): Promise<any> {
@@ -329,8 +331,8 @@ export class QQClient extends MusicClientBase {
     if (songId === undefined || songId === null || String(songId).trim() === '') {
       throw new NotFoundError('Song not found');
     }
-    const result = await this.call('like', { id: songId, like: status ? 'true' : 'false' });
-    if (Number(result?.result?.tid) <= 0) {
+    const result = await this.call('like', { id: songId, like: status ? 'true' : 'false', loginType: this.qqLoginType });
+    if (result?.success !== true && Number(result?.result?.tid) <= 0) {
       return { success: false, status: curStatus };
     }
     if (status) {

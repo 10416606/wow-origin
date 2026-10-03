@@ -1,12 +1,12 @@
 'use strict';
 
-const { randomUUID, randomBytes } = require('node:crypto');
-const { loginCgi, credentialCookies, loginError } = require('./login-http');
+const { randomUUID } = require('node:crypto');
+const { credentialCookies, loginError } = require('./login-http');
+const { createAndroidLoginContextFromIdentity, bindAndroidLoginContext } = require('./android-login');
 const sessions = new Map();
 const cooldowns = new Map();
 const sending = new Set();
 const TTL = 10 * 60 * 1000;
-const UA = 'QQMusic 14090008(android 12)';
 
 function normalizePhone(phone, countryCode = '86') {
   phone = String(phone || '').trim();
@@ -15,21 +15,7 @@ function normalizePhone(phone, countryCode = '86') {
   return { phone, countryCode };
 }
 
-async function createSession() {
-  const guid = randomBytes(8).toString('hex');
-  const comm = {
-    ct: 11, cv: 14090008, v: 14090008, chid: '10003505', tmeAppID: 'qqmusic',
-    OpenUDID: guid, udid: guid, OpenUDID2: randomBytes(8).toString('hex'),
-    aid: randomBytes(8).toString('hex'), os_ver: '12', phonetype: 'Pixel 5',
-  };
-  const result = await loginCgi('music.getSession.session', 'GetSession', { uid: '', vkey: 0, caller: 2 }, comm, UA);
-  if (result.code !== 0) throw loginError(result.code);
-  const session = result.data?.session;
-  if (!session?.uid || !session?.sid) throw new Error('QQ 音乐未返回手机登录会话');
-  return { ...comm, uid: String(session.uid), sid: session.sid };
-}
-
-async function sendPhoneCode(phone, countryCode = '86', token = '') {
+async function sendPhoneCode(phone, countryCode = '86', token = '', identityValue) {
   const normalized = normalizePhone(phone, countryCode);
   const now = Date.now();
   for (const [key, value] of sessions) if (value.expiresAt <= now) sessions.delete(key);
@@ -43,15 +29,16 @@ async function sendPhoneCode(phone, countryCode = '86', token = '') {
   sending.add(key);
   try {
     if (!session) {
-      const comm = await createSession();
+      const android = createAndroidLoginContextFromIdentity(identityValue);
+      await android.ensureSession();
       token = randomUUID();
-      session = { key, phone: normalized.phone, comm, expiresAt: now + TTL, busy: false, sent: false };
+      session = { key, phone: normalized.phone, android, expiresAt: now + TTL, busy: false, sent: false };
       sessions.set(token, session);
     }
     session.busy = true;
-    const result = await loginCgi('music.login.LoginServer', 'SendPhoneAuthCode', {
+    const result = await session.android.androidLoginCgi('music.login.LoginServer', 'SendPhoneAuthCode', {
       tmeAppid: 'qqmusic', areaCode: normalized.countryCode, phoneNo: normalized.phone,
-    }, { ...session.comm, tmeLoginMethod: 3 }, UA);
+    }, {}, { tmeLoginMethod: 3 });
     if (result.code === 20276) {
       const securityUrl = String(result.data?.securityURL || '');
       if (!/^https:\/\//i.test(securityUrl)) throw new Error('QQ 音乐要求安全验证，但未返回验证地址');
@@ -80,11 +67,12 @@ async function phoneLogin(token, code) {
   if (session.busy) throw new Error('正在登录，请稍候');
   session.busy = true;
   try {
-    const result = await loginCgi('music.login.LoginServer', 'Login', {
+    const result = await session.android.androidLoginCgi('music.login.LoginServer', 'Login', {
       phoneNo: session.phone, code: String(code), loginMode: 1,
-    }, { ...session.comm, tmeLoginMethod: 3, tmeLoginType: 0 }, UA);
+    }, {}, { tmeLoginMethod: 3, tmeLoginType: 0 });
     if (result.code !== 0) throw loginError(result.code);
     const cookie = credentialCookies({ loginType: 0, ...result.data });
+    bindAndroidLoginContext(cookie.musicid, session.android);
     sessions.delete(token);
     return cookie;
   } finally { session.busy = false; }

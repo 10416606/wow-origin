@@ -411,6 +411,33 @@ describe('login router', () => {
     expect(callModule).not.toHaveBeenCalled()
   })
 
+  test('重复扫码已有 QQ 账号时复用保存的 deviceId', async () => {
+    const workDir = makeWorkDir()
+    const { createAndroidLoginContext, encodeIdentity, deviceIdFromIdentity } = require('../../../platforms/qqmusic/util/android-login')
+    const identity = encodeIdentity(createAndroidLoginContext())
+    const store = createLocalAccountStore(workDir)
+    store.update('key-1', { deviceId: deviceIdFromIdentity(identity), deviceState: identity })
+    store.close()
+    const callModule = jest.fn(async () => ({ code: 200, body: { data: { unikey: 'qr-token', qrImg: 'qr-image' } } }))
+    const { app } = createApp(workDir, { getPlatform: () => ({ callModule }) })
+    await request(app).post('/login/api/start').send({ mode: 'update', api_access_key: 'key-1', platform: 'qq' }).expect(200)
+    expect(callModule).toHaveBeenCalledWith('login/qr/key', expect.objectContaining({
+      query: expect.objectContaining({ qq_android_identity: identity })
+    }))
+  })
+
+  test('已有 deviceId 但设备状态缺失时不生成新设备', async () => {
+    const workDir = makeWorkDir()
+    const store = createLocalAccountStore(workDir)
+    store.update('key-1', { deviceId: 'existing-id' })
+    store.close()
+    const callModule = jest.fn()
+    const { app } = createApp(workDir, { getPlatform: () => ({ callModule }) })
+    const response = await request(app).post('/login/api/start').send({ mode: 'update', api_access_key: 'key-1', platform: 'qq' }).expect(400)
+    expect(response.body.message).toContain('deviceId')
+    expect(callModule).not.toHaveBeenCalled()
+  })
+
   test('更新模式不能切换已有账号平台', async () => {
     const workDir = makeWorkDir()
     const callModule = jest.fn()

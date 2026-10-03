@@ -26,11 +26,13 @@ function cookieHeader(cookies) {
   return Object.entries(cookies).map(([key, value]) => `${key}=${value}`).join('; ');
 }
 
-async function loginFetch(url, options = {}, stage = '登录请求') {
+async function loginFetch(url, options = {}, stage = '登录请求', browserHeaders = true) {
   try {
     const response = await fetch(url, {
       ...options,
-      headers: { 'User-Agent': UA, 'Accept-Language': 'zh-CN,zh;q=0.9', Referer: 'https://y.qq.com/', ...options.headers },
+      headers: browserHeaders
+        ? { 'User-Agent': UA, 'Accept-Language': 'zh-CN,zh;q=0.9', Referer: 'https://y.qq.com/', ...options.headers }
+        : options.headers,
       redirect: 'manual',
       signal: AbortSignal.timeout(20000),
     });
@@ -53,7 +55,7 @@ async function loginCgi(module, method, param, comm, userAgent) {
       comm: Object.fromEntries(Object.entries(comm).map(([key, value]) => [key, String(value)])),
       req_0: { module, method, param },
     }),
-  }, method);
+  }, method, false);
   const json = await response.json().catch(() => null);
   if (!json || json.code !== 0 || !json.req_0 || typeof json.req_0.code !== 'number') {
     throw new Error(`${method} 返回无效响应${Number.isFinite(json?.code) ? ` (${json.code})` : ''}`);
@@ -75,7 +77,7 @@ function credentialCookies(data) {
   const musicid = String(data?.str_musicid || data?.musicid || '');
   if (!/^[1-9]\d*$/.test(musicid) || !data?.musickey) throw new Error('QQ 音乐未返回有效登录凭证');
   const cookies = { uin: musicid, qm_keyst: data.musickey, musicid, musickey: data.musickey };
-  for (const key of ['openid', 'unionid', 'access_token', 'refresh_token', 'refresh_key', 'expired_at', 'musickeyCreateTime', 'keyExpiresIn', 'loginType']) {
+  for (const key of ['openid', 'unionid', 'access_token', 'refresh_token', 'refresh_key', 'expired_at', 'musickeyCreateTime', 'keyExpiresIn', 'loginType', 'str_musicid', 'firstLogin', 'bindAccountType', 'needRefreshKeyIn', 'encryptUin']) {
     if (data[key] !== undefined) cookies[key] = String(data[key]);
   }
   return cookies;
