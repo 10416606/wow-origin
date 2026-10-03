@@ -60,6 +60,7 @@ export function createAdapter(
 
   const defaultGetTrackUrl = client.getTrackUrl.bind(client);
   const getLxTrackUrl = async (id: string, quality?: string): Promise<TrackUrl | undefined> => {
+    if (account.platform === 'netease' && quality === 'jyeffect') return undefined;
     try {
       const lxTrackUrl = account.lxSource?.length
         ? await lxTrackUrlResolver.resolveTrackUrl(account.platform, id, quality, account.lxSource)

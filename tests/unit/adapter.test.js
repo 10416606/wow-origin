@@ -80,6 +80,24 @@ describe('Wow adapter', () => {
     expect(officialSpy).not.toHaveBeenCalled()
   })
 
+  test('高清臻音使用网易云专用档位，不把洛雪 Hi-Res 标成高清臻音', async () => {
+    const officialTrackUrl = {
+      url: 'https://official.test/jyeffect.flac', quality: 'jyeffect', format: 'flac', bitrate: null, size: 100
+    }
+    const officialSpy = jest.spyOn(NeteaseClient.prototype, 'getTrackUrl').mockResolvedValue(officialTrackUrl)
+    const lxResolver = { resolveTrackUrl: jest.fn().mockResolvedValue({
+      url: 'https://lx.test/hires.flac', quality: 'hires', format: 'flac', bitrate: null, size: 100
+    }) }
+    const adapter = createAdapter({
+      platform: 'netease', name: '网易云', cookie: 'MUSIC_U=value', apiAccessKey: 'token-1',
+      useLuoxue: true, favoriteTrackIds: new Set()
+    }, lxResolver)
+
+    await expect(adapter.getTrackUrl('track-1', 'jyeffect')).resolves.toEqual(officialTrackUrl)
+    expect(officialSpy).toHaveBeenCalledWith('track-1', 'jyeffect')
+    expect(lxResolver.resolveTrackUrl).not.toHaveBeenCalled()
+  })
+
   test('存在 cookie 且洛雪源无结果时回退到官方地址', async () => {
     const officialTrackUrl = {
       url: 'https://official.test/song.mp3',

@@ -3,6 +3,7 @@ import { mapAlbum, mapAlbumDetail, mapArtist, mapArtistDetail, mapPlaylist, mapS
 import { MusicClientBase } from './MusicClientBase';
 import { NotFoundError } from '../errors';
 import { getNeteasePlaylistCategoryMap } from '../playlistCategories';
+import { isNeteaseEnhancedQuality } from '../quality';
 
 const DEFAULT_NETEASE_QUALITY = 'exhigh';
 const NETEASE_NO_LYRICS_PLACEHOLDER = '[00:00.00]暂无歌词';
@@ -112,12 +113,15 @@ export class NeteaseClient extends MusicClientBase {
   }
 
   async getTrackDetail(id: string): Promise<Track> {
-    const raw = await this.call('song_detail', { ids: id });
+    const [raw, audioDetail] = await Promise.all([
+      this.call('song_detail', { ids: id }),
+      this.call('song_music_detail', { id }).catch(() => null)
+    ]);
     const track = raw.songs?.[0];
     if (!track) {
       throw new NotFoundError('Song not found');
     }
-    return this.withFavoriteTrack(mapTrack(track));
+    return this.withFavoriteTrack(mapTrack({ ...track, ...(audioDetail || {}) }));
   }
 
   async getSimilarTracks(id: string): Promise<Track[]> {
@@ -127,17 +131,27 @@ export class NeteaseClient extends MusicClientBase {
   }
 
   async getTrackUrl(id: string, quality?: string): Promise<TrackUrl> {
+    const enhancedQuality = isNeteaseEnhancedQuality(quality);
     const qualityCandidates = !quality
-      ? [DEFAULT_NETEASE_QUALITY, 'higher', 'standard']
+      ? [DEFAULT_NETEASE_QUALITY, 'standard']
       : quality === 'max'
-      ? ['lossless', 'exhigh', 'higher', 'standard']
+      ? ['master', 'lossless', 'exhigh', 'standard']
       : quality === 'min'
-        ? ['standard', 'higher', 'exhigh', 'lossless']
-        : [quality];
-    let resolvedAudio: any | undefined;
+        ? ['standard', 'exhigh', 'lossless', 'hires', 'master']
+        : enhancedQuality
+          ? [quality, 'lossless', 'exhigh', 'standard']
+          : [quality];
+    let lastError: unknown;
 
     for (const candidate of qualityCandidates) {
-      const raw = await this.call('song_url_v1', { id, level: candidate, en: 'flac' });
+      let raw: any;
+      try {
+        raw = await this.call('song_url_xeapi', { id, level: candidate });
+      } catch (error) {
+        if (qualityCandidates.length === 1) throw error;
+        lastError = error;
+        continue;
+      }
       const candidates = [
         raw?.data,
         raw?.body?.data,
@@ -148,16 +162,12 @@ export class NeteaseClient extends MusicClientBase {
         .flatMap((candidate) => Array.isArray(candidate) ? candidate : [candidate])
         .find((item) => item?.url);
       if (audio?.url) {
-        resolvedAudio = { ...audio, level: audio.level || candidate };
-        break;
+        return mapTrackUrl({ ...audio, level: audio.level || candidate });
       }
     }
 
-    if (!resolvedAudio) {
-      throw new NotFoundError('Song has no playable audio URL');
-    }
-
-    return mapTrackUrl(resolvedAudio);
+    if (lastError) throw lastError;
+    throw new NotFoundError('Song has no playable audio URL');
   }
 
   async getTrackLyrics(id: string): Promise<TrackLyrics> {

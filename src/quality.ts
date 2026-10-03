@@ -3,6 +3,12 @@ import type { MusicPlatform } from './types';
 
 export type { QualityOption } from 'aduoer-wow-sdk';
 
+const NETEASE_ENHANCED_QUALITIES = new Set(['hires', 'jyeffect', 'master', 'sky']);
+
+export function isNeteaseEnhancedQuality(quality: string | undefined): boolean {
+  return quality !== undefined && NETEASE_ENHANCED_QUALITIES.has(quality);
+}
+
 export type PlatformQuality = QualityOption & {
   rank: number;
   bitrate?: number | null;
@@ -26,9 +32,12 @@ const PLATFORM_QUALITY_CONFIGS: Record<MusicPlatform, PlatformQualityConfig> = {
   netease: {
     qualities: [
       { key: 'standard', label: '标准', rank: 10, bitrate: 128000, sourceField: 'l' },
-      { key: 'higher', label: '高品质', rank: 20, bitrate: 192000, sourceField: 'm' },
       { key: 'exhigh', label: '极高 HQ', rank: 30, bitrate: 320000, sourceField: 'h' },
-      { key: 'lossless', label: '无损 SQ', rank: 40, sourceField: 'sq' }
+      { key: 'lossless', label: '无损 SQ', rank: 40, sourceField: 'sq' },
+      { key: 'hires', label: 'Hi-Res', rank: 50, sourceField: 'hr' },
+      { key: 'jyeffect', label: '高清臻音', rank: 60, sourceField: 'je' },
+      { key: 'sky', label: '沉浸环绕声', rank: 80, sourceField: 'sk' },
+      { key: 'master', label: '超清母带', rank: 90, sourceField: 'jm' }
     ]
   },
   ytmusic: {
@@ -58,9 +67,19 @@ export function getQualityCandidates(platform: MusicPlatform, quality: string): 
   return qualities.slice(0, index + 1).reverse().map((item) => item.key);
 }
 
+function getQualitySource(platform: MusicPlatform, definition: PlatformQuality, track: any): any {
+  if (platform === 'netease' && definition.key === 'sky') {
+    if (Array.isArray(track.sks) && track.sks.length > 0) {
+      return track.sks.find((item: any) => item?.it === 'c51');
+    }
+    return track.sk && (!track.sk.it || track.sk.it === 'c51') ? track.sk : undefined;
+  }
+  return definition.sourceField ? track[definition.sourceField] : undefined;
+}
+
 export function mapTrackQualities(platform: MusicPlatform, track: any = {}): Quality[] {
   return getPlatformQualities(platform).flatMap((definition) => {
-    const source = definition.sourceField ? track[definition.sourceField] : undefined;
+    const source = getQualitySource(platform, definition, track);
     if (!source || Number(source.size) <= 0) {
       return [];
     }

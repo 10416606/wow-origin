@@ -1,5 +1,6 @@
-import type { Album, AlbumDetail, Artist, ArtistDetail, Playlist, Quality, SearchSuggest, Track, TrackLyrics, TrackUrl, UserProfile } from 'aduoer-wow-sdk';
+import type { Album, AlbumDetail, Artist, ArtistDetail, Playlist, SearchSuggest, Track, TrackLyrics, TrackUrl, UserProfile } from 'aduoer-wow-sdk';
 import { makeTrackLyrics, stripNeteaseWordLyricMetadata } from '../trackLyrics';
+import { mapTrackQualities } from '../quality';
 import type { Lyrics } from '../types';
 
 type Creator = NonNullable<Playlist['creator']>;
@@ -91,49 +92,8 @@ export function mapAlbum(album: any = {}): Album {
   };
 }
 
-export const QUALITY_MAP: Record<string, Quality> = {
-  "l": {
-    key: "standard",
-    label: "标准",
-    bitrate: 128000,
-    // format: "mp3",
-    size: 0.
-  },
-  "m": {
-    key: "higher",
-    label: "高品质",
-    bitrate: 192000,
-    // format: "mp3",
-    size: 0.
-  },
-  "h": {
-    key: "exhigh",
-    label: "极高 HQ",
-    bitrate: 320000,
-    // format: "mp3",
-    size: 0.
-  },
-  "sq": {
-    key: "lossless",
-    label: "无损 SQ",
-    // format: "flac",
-    size: 0.
-  },
-};
-
 export function mapTrack(track: any = {}): Track {
-  const qualities: Quality[] = [];
-  Object.entries(QUALITY_MAP).forEach(([key, el]) => {
-    if (track[key] && track[key].size > 0) {
-      const q: Quality = {
-        ...el,
-        size: Number(track[key].size) || 0,
-        bitrate: track[key].br > 0 ? track[key].br : (el.bitrate || 0),
-        format: el.format
-      };
-      qualities.push(q);
-    }
-  });
+  const qualities = mapTrackQualities('netease', track);
   return {
     id: toStringId(track.id || track.mid),
     title: track.name || track.title || '',
