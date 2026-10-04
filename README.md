@@ -1,6 +1,6 @@
 # Aduoer Wow Origin
 
-面向 [Aduoer](https://github.com/Aduoer-Music) 的 QQ 音乐、网易云音乐统一 Wow v1 音源服务，支持搜索、歌单、榜单、歌曲、歌手、专辑、歌词和播放地址。
+面向 [Aduoer](https://github.com/Aduoer-Music) 的 QQ 音乐、网易云音乐、YouTube Music 统一 Wow v1 音源服务，支持搜索、歌单、榜单、歌曲、歌手、专辑、歌词和播放地址。
 
 ## 截图
 ![image1](images/image1.png)
@@ -16,6 +16,12 @@
 | QX、Loon 重写 | - | 仅提供基本能力，无落雪源 |
 
 部署成功后，访问 `http://<your-server>:<port>/login` 配置账号
+
+### YouTube Music
+
+Docker、桌面版和 Cloudflare Workers 的登录页可添加 YouTube Music 账号。先在浏览器登录 `music.youtube.com`，打开开发者工具的网络面板，从 `youtubei/v1/browse` 请求头复制完整 `Cookie`，在登录页选择 **YouTube Music → Cookie 登录**。Cookie 需要包含 `__Secure-3PAPISID`，登录页会调用 YouTube Music 验证账号。如果上游只返回未登录菜单，请重新从已登录的 Music 页面复制完整 Cookie。若要在 Aduoer 中读取 YouTube Music 收藏，添加 Wow 源时将「用户数据存储位置」设为「自动」或「服务端」；选择「本地」时 App 会使用自己的本地收藏库。重写版不包含此音源。
+
+此接入参考 [ytmusicapi](https://github.com/sigma67/ytmusicapi) 的 InnerTube 请求与浏览器 Cookie 鉴权方式；播放请求采用 [yt-dlp](https://github.com/yt-dlp/yt-dlp) 的 visionOS 客户端参数。搜索、歌单、歌手、专辑、榜单和账号资料使用 YouTube Music 接口；播放地址通过服务端代理返回，支持播放器的 Range 请求。可用歌曲、歌词与音质以 YouTube Music 对当前账号和地区实际返回的内容为准。Cookie 失效时需在登录页重新填写。
 
 ### Cloudflare Workers（推荐）
 
@@ -88,7 +94,7 @@ Aduoer 中填写同一地址，并使用页面生成的 Token
 
 ```bash
 curl -H "Authorization: Bearer your_api_access_key" \
-  "http://localhost:3000/v1/search/tracks?keywords=周杰伦&limit=20"
+  "http://localhost:3000/v1/search/tracks?keyword=周杰伦&limit=20"
 ```
 
 常用接口：

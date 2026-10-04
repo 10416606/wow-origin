@@ -12,6 +12,10 @@ import {
 import type { MusicPlatform } from './types';
 import { BadRequestError, UpstreamError } from './errors';
 import { qrCodeDataUrl } from './qr';
+import { preloadSessionFavorites } from './onload';
+import { YTMusicClient } from './clients/YTMusicClient';
+
+const { deviceIdFromIdentity } = require('../platforms/qqmusic/util/android-login');
 
 type ResourcePlatform = 'netease' | 'qqmusic';
 type LoginMode = 'create' | 'update';
@@ -46,10 +50,12 @@ function normalizeLoginPlatform(value: unknown): MusicPlatform {
   const platform = String(value || '').trim().toLowerCase();
   if (platform === 'qq' || platform === 'qqmusic') return 'qq';
   if (platform === 'netease') return 'netease';
+  if (platform === 'ytmusic' || platform === 'youtube-music') return 'ytmusic';
   throw new BadRequestError('不支持的平台');
 }
 
 function toResourcePlatform(platform: MusicPlatform): ResourcePlatform {
+  if (platform === 'ytmusic') throw new BadRequestError('YouTube Music 仅支持 Cookie 登录');
   return platform === 'qq' ? 'qqmusic' : 'netease';
 }
 
@@ -128,6 +134,16 @@ function accountData(session: MusicAccountSession, allowAccountLxSources: boolea
   };
 }
 
+function existingQqDeviceQuery(session?: MusicAccountSession): Record<string, string> {
+  if (!session) return {};
+  if (!session.deviceId && !session.deviceState) return {};
+  const storedId = deviceIdFromIdentity(session.deviceState);
+  if (!storedId || (session.deviceId && session.deviceId !== storedId)) {
+    throw new BadRequestError('QQ 账号已有 deviceId，但设备状态缺失或不匹配，请修复设备记录');
+  }
+  return { qq_android_identity: session.deviceState! };
+}
+
 function sendLoginPage(_req: Request, res: Response): void {
   res.type('html').set('Cache-Control', 'no-store').sendFile(
     path.join(__dirname, '..', 'public', 'index.html')
@@ -140,6 +156,7 @@ async function resolveLoggedInAccountName(
   platformFactory: PlatformFactoryLike
 ): Promise<string> {
   try {
+    if (platform === 'ytmusic') return (await new YTMusicClient(cookie).getUserMe()).nickname;
     const result = await callLoginModule(platformFactory, platform, 'user/detail', parseLoginCookie(cookie));
     const profile = result.body || result;
     return String(profile.nickname || '').trim();
@@ -164,6 +181,10 @@ function normalizeManualCookie(platform: MusicPlatform, value: unknown): Record<
     cookies.uin = (cookies.qqmusic_uin || cookies.musicid || cookies.uin || '').replace(/^o0*/, '');
     cookies.qm_keyst = cookies.qqmusic_key || cookies.musickey || cookies.qm_keyst || '';
     if (!/^[1-9]\d*$/.test(cookies.uin) || !cookies.qm_keyst) throw new BadRequestError('QQ Cookie 缺少账号 ID 或登录凭证');
+  } else if (platform === 'ytmusic') {
+    if (!cookies['__Secure-3PAPISID'] && !cookies.SAPISID) {
+      throw new BadRequestError('YouTube Music Cookie 缺少 __Secure-3PAPISID');
+    }
   } else if (!cookies.MUSIC_U) throw new BadRequestError('网易云 Cookie 缺少 MUSIC_U');
   return cookies;
 }
@@ -245,10 +266,20 @@ export function createLoginRouter({
   async function saveLogin(target: PendingLogin, cookie: string, verifiedName?: string) {
     if (!cookie) throw new UpstreamError('登录成功但未获取到有效 cookie');
     const { mode, platform, apiAccessKey } = target;
+    const previousCookie = mode === 'update' ? registry.byAccessKey.get(apiAccessKey)?.cookie : undefined;
     const result = mode === 'update'
       ? updateAccountCookieByAccessKey(apiAccessKey, platform, cookie, registry, storage)
       : createAccountWithCookie(apiAccessKey, platform, cookie, registry, storage,
         verifiedName ?? await resolveLoggedInAccountName(platform, cookie, platformFactory));
+    if (previousCookie !== undefined && previousCookie !== result.session.cookie) {
+      result.session.favoriteTrackIds.clear();
+      result.session.userPlaylistIds.clear();
+      result.session.favoriteArtistIds.clear();
+      result.session.favoriteAlbumIds.clear();
+      result.session.favoriteArtistsLoaded = false;
+      result.session.favoriteAlbumsLoaded = false;
+    }
+    await preloadSessionFavorites(result.session);
     onAccountsChanged?.();
     return { status: 'success', mode, ...accountData(result.session, allowAccountLxSources), accountName: result.session.name, message: '登录成功' };
   }
@@ -286,8 +317,8 @@ export function createLoginRouter({
       const result = updateAccountConfigByAccessKey(session.apiAccessKey, {
         name: req.body?.name,
         stateless: req.body?.stateless,
-        useLuoxue: req.body?.useLuoxue,
-        lxSource: allowAccountLxSources ? req.body?.lxSource : []
+        useLuoxue: session.platform === 'ytmusic' ? false : req.body?.useLuoxue,
+        lxSource: session.platform === 'ytmusic' ? [] : allowAccountLxSources ? req.body?.lxSource : []
       }, registry, storage);
       onAccountsChanged?.();
       res.json({ code: 200, data: { ...accountData(result.session, allowAccountLxSources), message: '配置已保存' } });
@@ -299,8 +330,11 @@ export function createLoginRouter({
   router.post('/api/start', async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { mode, platform, apiAccessKey } = loginTarget(req.body);
+      if (platform === 'ytmusic') throw new BadRequestError('YouTube Music 请使用 Cookie 登录');
 
-      const result = await callLoginModule(platformFactory, platform, 'login/qr/key');
+      const existing = mode === 'update' ? registry.byAccessKey.get(apiAccessKey) : undefined;
+      const result = await callLoginModule(platformFactory, platform, 'login/qr/key',
+        platform === 'qq' ? existingQqDeviceQuery(existing) : {});
       const qr = getQrPayload(platform, result);
       const qrImage = qr.qrImage || (qr.qrText
         ? qrCodeDataUrl(qr.qrText)
@@ -362,6 +396,12 @@ export function createLoginRouter({
     try {
       const target = loginTarget(req.body);
       const values = normalizeManualCookie(target.platform, req.body?.cookie);
+      if (target.platform === 'ytmusic') {
+        const cookie = serializeCookie(values);
+        const profile = await new YTMusicClient(cookie).getUserMe();
+        res.json({ code: 200, data: await saveLogin(target, cookie, profile.nickname) });
+        return;
+      }
       const result = await callLoginModule(platformFactory, target.platform,
         target.platform === 'qq' ? 'login/cookie' : 'user/detail', values);
       const profile = result.body || result;
@@ -384,7 +424,11 @@ export function createLoginRouter({
         }
         target = previous;
       }
-      const result = await callLoginModule(platformFactory, target.platform, 'login/phone/send', { phone, countryCode, token });
+      const existing = target.mode === 'update' ? registry.byAccessKey.get(target.apiAccessKey) : undefined;
+      const result = await callLoginModule(platformFactory, target.platform, 'login/phone/send', {
+        phone, countryCode, token,
+        ...(target.platform === 'qq' ? existingQqDeviceQuery(existing) : {})
+      });
       const data = result.body;
       if (!data || !['sent', 'captcha', 'frequency'].includes(data.status)) throw new UpstreamError('验证码发送返回无效状态');
       const sessionToken = String(data.token || token || '').trim();

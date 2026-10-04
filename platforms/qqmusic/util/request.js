@@ -13,6 +13,12 @@ const DEFAULT_HEADERS = {
   'Referer': 'https://y.qq.com/'
 }
 
+const PLAIN_HEADERS = {
+  'Content-Type': 'application/x-www-form-urlencoded',
+  'Accept': 'application/json',
+  'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 26_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) MicroMessenger/8.0 miniProgram'
+}
+
 // 创建全局HTTP/HTTPS连接池
 const httpAgent = new http.Agent({
   keepAlive: true,
@@ -41,6 +47,7 @@ logger.compact('info', 'QQMusic HTTP connection pool initialized (maxSockets: 50
 const createRequest = (module, method, data, options = {}) => {
   return new Promise((resolve, reject) => {
     try {
+      const plain = options.transport === 'plain'
       // 构建请求数据结构
       const requestData = {
         comm: {
@@ -54,7 +61,8 @@ const createRequest = (module, method, data, options = {}) => {
           needNewCode: 1,
           uin: Number(options.uin) || 0,
           g_tk_new_20200303: options.g_tk || 1083888122,
-          g_tk: options.g_tk || 1083888122
+          g_tk: options.g_tk || 1083888122,
+          ...options.comm
         },
         req_0: {
           module: module,
@@ -66,20 +74,24 @@ const createRequest = (module, method, data, options = {}) => {
       // 序列化请求数据
       const jsonData = JSON.stringify(requestData)
 
-      const encryptData = encryptRequest(requestData)
+      const requestBody = plain ? jsonData : encryptRequest(requestData)
 
       // 生成签名
       const signature = zzcSign(jsonData)
 
       // 构建请求URL
-      const url = `https://u6.y.qq.com/cgi-bin/musics.fcg?_=${Date.now()}&encoding=ag-1&sign=${signature}`
+      const url = plain
+        ? `https://u6.y.qq.com/cgi-bin/musics.fcg?_webcgikey=${encodeURIComponent(options.webCgiKey || method)}&_=${Date.now()}&sign=${signature}`
+        : `https://u6.y.qq.com/cgi-bin/musics.fcg?_=${Date.now()}&encoding=ag-1&sign=${signature}`
 
       // 构建请求头
-      const headers = { ...DEFAULT_HEADERS }
+      const headers = plain ? { ...PLAIN_HEADERS } : { ...DEFAULT_HEADERS }
 
       // 添加Cookie（如果有登录信息）
       if (options.uin && options.qm_keyst) {
-        headers['Cookie'] = `qm_keyst=${options.qm_keyst}; uin=${options.uin}`
+        headers['Cookie'] = plain
+          ? `uin=o${options.uin}; qm_keyst=${options.qm_keyst}`
+          : `qm_keyst=${options.qm_keyst}; uin=${options.uin}`
       }
 
       // 添加自定义IP（如果需要）
@@ -93,7 +105,7 @@ const createRequest = (module, method, data, options = {}) => {
         method: 'POST',
         url: url,
         headers: headers,
-        data: encryptData,
+        data: requestBody,
         timeout: options.timeout || 30000,
         httpAgent: httpAgent,
         httpsAgent: httpsAgent,
@@ -110,7 +122,9 @@ const createRequest = (module, method, data, options = {}) => {
       // 发送请求
       axios(axiosConfig)
         .then((response) => {
-          let result = JSON.parse(decryptResponse(response.data))
+          let result = plain
+            ? JSON.parse(Buffer.from(response.data).toString('utf8'))
+            : JSON.parse(decryptResponse(response.data))
 
           // 检查响应状态
           const answer = {
@@ -128,7 +142,7 @@ const createRequest = (module, method, data, options = {}) => {
           }
 
           // 提取实际数据（通常在req_0.data中）
-          if (result.req_0 && result.req_0.data) {
+          if (!options.keepEnvelope && result.req_0 && result.req_0.data) {
             answer.body = result.req_0.data
           }
 

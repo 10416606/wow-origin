@@ -10,6 +10,39 @@ const { CloudflareLxSourceManager } = require('../../cloudflare/lx-manager')
 describe('Cloudflare extended LX quality', () => {
   beforeEach(() => { jest.spyOn(global, 'fetch').mockRejectedValue(new Error('metadata unavailable')) })
   afterEach(() => { delete global.lxQualityHandler; jest.useRealTimers(); jest.restoreAllMocks() })
+  test('QQ catalogue supplies matching master size when CDN GET and HEAD are denied', async () => {
+    global.lxQualityHandler = jest.fn().mockImplementation(({ info }) => info.type === 'master'
+      ? Promise.resolve('https://aqqmusic.tc.qq.com/AI00example.flac?vkey=test') : Promise.reject(new Error('unavailable')))
+    global.fetch.mockImplementation(async (url) => url === 'https://u.y.qq.com/cgi-bin/musicu.fcg'
+      ? Response.json({ req: { data: { track_info: { mid: 'song', file: { size_flac: 73008761, size_new: [227033211] } } } } })
+      : new Response('', { status: 403 }))
+    const manager = new CloudflareLxSourceManager()
+    expect(await manager.getTrackQualities('qq', 'song')).toEqual([
+      { key: 'master', label: '母带', size: 227033211, format: 'flac', bitrate: null }
+    ])
+    expect(await manager.resolveTrackUrl('qq', 'song', 'master')).toMatchObject({ quality: 'master', size: 227033211, format: 'flac' })
+    expect(global.fetch.mock.calls.filter(([url]) => url === 'https://u.y.qq.com/cgi-bin/musicu.fcg')).toHaveLength(1)
+  })
+  test('unknown files never borrow the catalogue master size', async () => {
+    global.lxQualityHandler = jest.fn().mockResolvedValue('https://aqqmusic.tc.qq.com/F000example.flac')
+    global.fetch.mockResolvedValue(new Response('', { status: 403 }))
+    expect(await new CloudflareLxSourceManager().resolveTrackUrl('qq', 'song', 'master')).toMatchObject({ size: 0 })
+    expect(global.fetch.mock.calls.every(([url]) => url !== 'https://u.y.qq.com/cgi-bin/musicu.fcg')).toBe(true)
+  })
+  test('size from the returned audio takes precedence over catalogue size', async () => {
+    global.lxQualityHandler = jest.fn().mockResolvedValue('https://aqqmusic.tc.qq.com/AI00example.flac')
+    global.fetch.mockImplementation(async (url) => url === 'https://u.y.qq.com/cgi-bin/musicu.fcg'
+      ? Response.json({ req: { data: { track_info: { mid: 'song', file: { size_new: [227033211] } } } } })
+      : new Response('fLaC', { status: 206, headers: { 'content-range': 'bytes 0-3/123456' } }))
+    expect(await new CloudflareLxSourceManager().resolveTrackUrl('qq', 'song', 'master')).toMatchObject({ size: 123456 })
+  })
+  test('catalogue for a different song is not used', async () => {
+    global.lxQualityHandler = jest.fn().mockResolvedValue('https://aqqmusic.tc.qq.com/AI00example.flac')
+    global.fetch.mockImplementation(async (url) => url === 'https://u.y.qq.com/cgi-bin/musicu.fcg'
+      ? Response.json({ req: { data: { track_info: { mid: 'another', file: { size_new: [227033211] } } } } })
+      : new Response('', { status: 403 }))
+    expect(await new CloudflareLxSourceManager().resolveTrackUrl('qq', 'song', 'master')).toMatchObject({ size: 0 })
+  })
   test('track qualities report exact-tier size and omit unavailable master without downgrading', async () => {
     global.lxQualityHandler = jest.fn().mockImplementation(({ info }) => info.type === 'master'
       ? Promise.reject(new Error('unavailable')) : Promise.resolve('https://audio.test/' + info.type))

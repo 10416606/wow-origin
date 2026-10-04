@@ -9,7 +9,7 @@ module.exports = (query, request) => {
   return request(`/api/v3/song/detail`, data, {
     crypto: 'weapi',
     useCheckToken: false,
-    MUSIC_U: ''
+    MUSIC_U: query.MUSIC_U || ''
   }).then((res) => {
     return res.body
   })

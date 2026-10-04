@@ -86,7 +86,8 @@ function formatUserPlaylist(data, uid, query, offset) {
 
   return {
     playlist: formattedPlaylists,
-    total: formattedPlaylists.length
+    total: Number(data.count ?? data.total ?? formattedPlaylists.length),
+    more: Boolean(data.more ?? playlists.length >= Number(query.limit || 1000))
   }
 }
 

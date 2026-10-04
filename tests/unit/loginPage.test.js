@@ -24,7 +24,7 @@ function page() {
     return el
   }
   const methods = ['qr', 'phone', 'cookie'].map(method => element(method, { method }))
-  const platforms = ['qq', 'netease'].map(platform => element(platform, { platform }))
+  const platforms = ['qq', 'netease', 'ytmusic'].map(platform => element(platform, { platform }))
   const document = {
     createElement: tag => element(`${tag}-${elements.size}`),
     getElementById: element, documentElement: element('document'), body: element('body'),
@@ -73,6 +73,17 @@ test('switching to NetEase keeps the phone option and clears a previous challeng
   element('netease').handlers.click()
   expect(element('phone-login-panel').classList.contains('hidden')).toBe(false)
   expect(element('phone-captcha-frame').src).toBeUndefined()
+})
+
+test('switching to YouTube Music opens Cookie login and hides other methods', async () => {
+  const { element } = page()
+  await new Promise(setImmediate)
+  element('ytmusic').handlers.click()
+  expect(element('cookie-login-panel').classList.contains('hidden')).toBe(false)
+  expect(element('qr-login-panel').classList.contains('hidden')).toBe(true)
+  expect(element('qr').classList.contains('hidden')).toBe(true)
+  expect(element('phone').classList.contains('hidden')).toBe(true)
+  expect(element('ytmusic-cookie-help').classList.contains('hidden')).toBe(false)
 })
 
 test('desktop only allows the local CAPTCHA proxy frame', () => {

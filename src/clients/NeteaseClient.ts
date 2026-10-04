@@ -3,6 +3,7 @@ import { mapAlbum, mapAlbumDetail, mapArtist, mapArtistDetail, mapPlaylist, mapS
 import { MusicClientBase } from './MusicClientBase';
 import { NotFoundError } from '../errors';
 import { getNeteasePlaylistCategoryMap } from '../playlistCategories';
+import { isNeteaseEnhancedQuality } from '../quality';
 
 const DEFAULT_NETEASE_QUALITY = 'exhigh';
 const NETEASE_NO_LYRICS_PLACEHOLDER = '[00:00.00]暂无歌词';
@@ -10,16 +11,16 @@ const NETEASE_NO_LYRICS_PLACEHOLDER = '[00:00.00]暂无歌词';
 export class NeteaseClient extends MusicClientBase {
   private readonly musicU: string;
 
-  constructor(cookie: string, favoriteTrackSet?: Set<string>) {
-    super(cookie, 'netease', favoriteTrackSet);
+  constructor(cookie: string, favoriteTrackSet?: Set<string>, favoriteArtistSet?: Set<string>, favoriteAlbumSet?: Set<string>, userPlaylistSet?: Set<string>) {
+    super(cookie, 'netease', favoriteTrackSet, favoriteArtistSet, favoriteAlbumSet, userPlaylistSet);
     this.musicU = this.getCookieValue('MUSIC_U');
   }
 
-  private async call(route: string, query: Record<string, any> = {}): Promise<any> {
+  private async call(route: string, query: Record<string, any> = {}, keepEnvelope = false): Promise<any> {
     return this.callModule(route, {
       ...query,
       MUSIC_U: this.musicU || query.MUSIC_U || ''
-    });
+    }, {}, keepEnvelope);
   }
 
   async getPlaylists(offset: number, limit: number, category?: string): Promise<PlaylistPage> {
@@ -80,7 +81,7 @@ export class NeteaseClient extends MusicClientBase {
   async getTopArtists(): Promise<Artist[]> {
     const raw = await this.call('top_artists');
     const artists = this.toArrayPayload(raw, ['artists', 'list']);
-    return artists.map((item: any) => mapArtist(item));
+    return this.withFavoriteArtists(artists.map((item: any) => mapArtist(item)));
   }
 
   async getRecommendedPlaylist(offset: number, limit: number): Promise<PlaylistPage> {
@@ -112,12 +113,15 @@ export class NeteaseClient extends MusicClientBase {
   }
 
   async getTrackDetail(id: string): Promise<Track> {
-    const raw = await this.call('song_detail', { ids: id });
+    const [raw, audioDetail] = await Promise.all([
+      this.call('song_detail', { ids: id }),
+      this.call('song_music_detail', { id }).catch(() => null)
+    ]);
     const track = raw.songs?.[0];
     if (!track) {
       throw new NotFoundError('Song not found');
     }
-    return this.withFavoriteTrack(mapTrack(track));
+    return this.withFavoriteTrack(mapTrack({ ...track, ...(audioDetail || {}) }));
   }
 
   async getSimilarTracks(id: string): Promise<Track[]> {
@@ -127,17 +131,27 @@ export class NeteaseClient extends MusicClientBase {
   }
 
   async getTrackUrl(id: string, quality?: string): Promise<TrackUrl> {
+    const enhancedQuality = isNeteaseEnhancedQuality(quality);
     const qualityCandidates = !quality
-      ? [DEFAULT_NETEASE_QUALITY, 'higher', 'standard']
+      ? [DEFAULT_NETEASE_QUALITY, 'standard']
       : quality === 'max'
-      ? ['lossless', 'exhigh', 'higher', 'standard']
+      ? ['master', 'lossless', 'exhigh', 'standard']
       : quality === 'min'
-        ? ['standard', 'higher', 'exhigh', 'lossless']
-        : [quality];
-    let resolvedAudio: any | undefined;
+        ? ['standard', 'exhigh', 'lossless', 'hires', 'master']
+        : enhancedQuality
+          ? [quality, 'lossless', 'exhigh', 'standard']
+          : [quality];
+    let lastError: unknown;
 
     for (const candidate of qualityCandidates) {
-      const raw = await this.call('song_url_v1', { id, level: candidate, en: 'flac' });
+      let raw: any;
+      try {
+        raw = await this.call('song_url_xeapi', { id, level: candidate });
+      } catch (error) {
+        if (qualityCandidates.length === 1) throw error;
+        lastError = error;
+        continue;
+      }
       const candidates = [
         raw?.data,
         raw?.body?.data,
@@ -148,16 +162,12 @@ export class NeteaseClient extends MusicClientBase {
         .flatMap((candidate) => Array.isArray(candidate) ? candidate : [candidate])
         .find((item) => item?.url);
       if (audio?.url) {
-        resolvedAudio = { ...audio, level: audio.level || candidate };
-        break;
+        return mapTrackUrl({ ...audio, level: audio.level || candidate });
       }
     }
 
-    if (!resolvedAudio) {
-      throw new NotFoundError('Song has no playable audio URL');
-    }
-
-    return mapTrackUrl(resolvedAudio);
+    if (lastError) throw lastError;
+    throw new NotFoundError('Song has no playable audio URL');
   }
 
   async getTrackLyrics(id: string): Promise<TrackLyrics> {
@@ -184,7 +194,9 @@ export class NeteaseClient extends MusicClientBase {
   async searchSuggest(keyword: string): Promise<SearchSuggest> {
     const raw = await this.call('search_suggest', { keywords: keyword });
     const result = mapSearchSuggest(raw);
-    return { ...result, songs: this.withFavoriteTracks(result.songs) };
+    const artists = this.withFavoriteArtists(result.artists);
+    const albums = this.withFavoriteAlbums(result.albums);
+    return { ...result, songs: this.withFavoriteTracks(result.songs), artists, albums };
   }
 
   async searchTracks(keyword: string, offset: number, limit: number): Promise<TrackPage> {
@@ -198,7 +210,7 @@ export class NeteaseClient extends MusicClientBase {
   async searchArtists(keyword: string, offset: number, limit: number): Promise<ArtistPage> {
     const raw = await this.call('cloudsearch', { keywords: keyword, type: 100, offset, limit });
     const result = raw.result || raw;
-    const items = Array.isArray(result.artists) ? result.artists.map((item: any) => mapArtist(item)) : [];
+    const items = this.withFavoriteArtists(Array.isArray(result.artists) ? result.artists.map((item: any) => mapArtist(item)) : []);
     const total = result.artistCount || items.length;
     return { items, offset, limit, hasMore: offset + items.length < total };
   }
@@ -206,7 +218,7 @@ export class NeteaseClient extends MusicClientBase {
   async searchAlbums(keyword: string, offset: number, limit: number): Promise<AlbumPage> {
     const raw = await this.call('cloudsearch', { keywords: keyword, type: 10, offset, limit });
     const result = raw.result || raw;
-    const items = Array.isArray(result.albums) ? result.albums.map((item: any) => mapAlbum(item)) : [];
+    const items = this.withFavoriteAlbums(Array.isArray(result.albums) ? result.albums.map((item: any) => mapAlbum(item)) : []);
     const total = result.albumCount || items.length;
     return { items, offset, limit, hasMore: offset + items.length < total };
   }
@@ -223,10 +235,14 @@ export class NeteaseClient extends MusicClientBase {
     const raw = await this.call('artist_detail', { id });
     const data = raw.data?.artist || raw.artist || raw.data || raw;
     const detail = mapArtistDetail(data);
+    detail.favorite = this.hasFavoriteArtist(detail.id);
     if (trackLimit !== 0) {
       const limit = trackLimit === -1 ? 1000 : trackLimit;
       const tracks = await this.call('artist_tracks', { id, order: 'hot', offset: 0, limit });
-      detail.tracks = (tracks.songs || []).map((item: any) => this.withFavoriteTrack(mapTrack(item)));
+      detail.tracks = (tracks.songs || []).map((item: any) => {
+        const track = this.withFavoriteTrack(mapTrack(item));
+        return { ...track, artists: this.withFavoriteArtists(track.artists) };
+      });
     }
     return detail;
   }
@@ -241,7 +257,7 @@ export class NeteaseClient extends MusicClientBase {
 
   async getArtistAlbums(id: string, offset: number, limit: number): Promise<AlbumPage> {
     const raw = await this.call('artist_album', { id, offset, limit });
-    const items = Array.isArray(raw.hotAlbums) ? raw.hotAlbums.map((item: any) => mapAlbum(item)) : [];
+    const items = this.withFavoriteAlbums(Array.isArray(raw.hotAlbums) ? raw.hotAlbums.map((item: any) => mapAlbum(item)) : []);
     const total = raw.total || items.length;
     return { items, offset, limit, hasMore: offset + items.length < total };
   }
@@ -249,14 +265,52 @@ export class NeteaseClient extends MusicClientBase {
   async getAlbumDetail(id: string, trackLimit: number = -1): Promise<AlbumDetail> {
     const raw = await this.call('album', { id });
     const detail = mapAlbumDetail(raw);
-    detail.tracks = trackLimit !== 0 ? this.withFavoriteTracks(detail.tracks) : [];
+    detail.favorite = this.hasFavoriteAlbum(detail.id);
+    if (detail.artist) detail.artist.favorite = this.hasFavoriteArtist(detail.artist.id);
+    detail.tracks = trackLimit !== 0 ? this.withFavoriteTracks(detail.tracks).map((track) => ({
+      ...track,
+      album: { ...track.album, favorite: this.hasFavoriteAlbum(track.album.id) },
+      artists: this.withFavoriteArtists(track.artists)
+    })) : [];
     return detail;
   }
 
   async getUserPlaylist(): Promise<Playlist[]> {
-    const raw = await this.call('user_playlist');
-    const playlists = raw.playlist || raw.data?.playlist || [];
-    return playlists.map((item: any) => mapPlaylist(item));
+    const items: Playlist[] = [];
+    const seen = new Set<string>();
+    const limit = 1000;
+    for (let offset = 0; ; offset += limit) {
+      const raw = await this.call('user_playlist', { offset, limit });
+      const playlists = raw.playlist || raw.data?.playlist || [];
+      const previousCount = items.length;
+      for (const playlist of playlists) {
+        const item = mapPlaylist(playlist);
+        if (!item.id || seen.has(item.id)) continue;
+        seen.add(item.id);
+        items.push(item);
+      }
+      if (raw.more !== true || items.length === previousCount) break;
+    }
+    this.replaceUserPlaylists(items);
+    return items;
+  }
+
+  async userArtists(): Promise<Artist[]> {
+    const artists = await this.loadSubscribedItems(
+      (offset, limit) => this.call('artist_sublist', { offset, limit }, true),
+      mapArtist
+    );
+    this.replaceFavoriteArtists(artists);
+    return artists;
+  }
+
+  async userAlbums(): Promise<Album[]> {
+    const albums = await this.loadSubscribedItems(
+      (offset, limit) => this.call('album_sublist', { offset, limit }, true),
+      mapAlbum
+    );
+    this.replaceFavoriteAlbums(albums);
+    return albums;
   }
 
   async userFavoriteTracks(): Promise<Track[]> {
@@ -327,7 +381,22 @@ export class NeteaseClient extends MusicClientBase {
     if (Number(raw.code) === 501) {
       return { success: false, status };
     }
+    this.setUserPlaylist(id, status);
     return { success: true, status };
+  }
+
+  async favoriteArtist(id: string, status: boolean): Promise<{ success: boolean; status: boolean }> {
+    const raw = await this.call('artist_sub', { id, t: status ? 1 : 0 });
+    const success = Number(raw?.code ?? 200) === 200;
+    if (success) this.setFavoriteArtist(id, status);
+    return { success, status: success ? status : this.hasFavoriteArtist(id) };
+  }
+
+  async favoriteAlbum(id: string, status: boolean): Promise<{ success: boolean; status: boolean }> {
+    const raw = await this.call('album_sub', { id, t: status ? 1 : 0 });
+    const success = Number(raw?.code ?? 200) === 200;
+    if (success) this.setFavoriteAlbum(id, status);
+    return { success, status: success ? status : this.hasFavoriteAlbum(id) };
   }
 
 }

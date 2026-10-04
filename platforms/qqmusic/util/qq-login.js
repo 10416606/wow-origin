@@ -3,7 +3,8 @@
 // Protocol reference: https://l-1124.github.io/QQMusicApi/reference/modules/login/
 const { randomUUID } = require('node:crypto');
 const { CookieJar } = require('tough-cookie');
-const { loginFetch, loginCgi, responseSetCookies, cookieHeader, credentialCookies, loginError } = require('./login-http');
+const { loginFetch, responseSetCookies, cookieHeader, credentialCookies, loginError } = require('./login-http');
+const { createAndroidLoginContextFromIdentity, bindAndroidLoginContext } = require('./android-login');
 const REDIRECT_URI = 'https://y.qq.com/portal/wx_redirect.html?login_type=1&surl=https://y.qq.com/';
 const LOGIN_JUMP = 'https://graph.qq.com/oauth2.0/login_jump';
 const PTLOGIN_ORIGIN = 'https://xui.ptlogin2.qq.com';
@@ -59,9 +60,9 @@ async function cookieMap(session, url) {
   return Object.fromEntries((await session.jar.getCookies(url)).map((cookie) => [cookie.key, cookie.value]));
 }
 
-async function startLogin() {
+async function startLogin(identityValue) {
   for (const [token, session] of sessions) if (session.expiresAt <= Date.now()) sessions.delete(token);
-  const session = { jar: new CookieJar(undefined, { looseMode: true }), expiresAt: Date.now() + TTL, pending: null };
+  const session = { jar: new CookieJar(undefined, { looseMode: true }), android: createAndroidLoginContextFromIdentity(identityValue), expiresAt: Date.now() + TTL, pending: null };
   const loginUrl = xloginUrl();
   const loginPage = await sessionFetch(session, loginUrl, {
     headers: { Referer: REFERER, Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/*,*/*;q=0.8' },
@@ -140,9 +141,11 @@ async function authorize(jumpUrl, session) {
   const redirect = location ? new URL(location, 'https://graph.qq.com/') : null;
   const code = redirect?.searchParams.get('code') || new URLSearchParams(redirect?.hash.slice(1)).get('code');
   if (!code) throw new Error(`QQ 授权未返回 code (HTTP ${response.status})`);
-  const result = await loginCgi('QQConnectLogin.LoginServer', 'QQLogin', { code }, { ct: 24, cv: 4747474, platform: 'yqq.json', tmeLoginType: 2 });
+  const result = await session.android.androidLoginCgi('QQConnectLogin.LoginServer', 'QQLogin', { code }, {}, { tmeLoginType: 2 });
   if (result.code !== 0) throw loginError(result.code);
-  return { status: 'done', cookie: credentialCookies({ loginType: 2, ...result.data }) };
+  const cookie = credentialCookies({ loginType: 2, ...result.data });
+  bindAndroidLoginContext(cookie.musicid, session.android);
+  return { status: 'done', cookie };
 }
 
 async function pollSession(session) {

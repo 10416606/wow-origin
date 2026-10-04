@@ -80,30 +80,57 @@ export function mapMusicPlatformToLx(platform: MusicPlatform): LxPlatform {
   return platform === 'qq' ? 'tx' : 'wy';
 }
 
-export function selectLxQuality(requestedQuality: string | undefined, supported: readonly LxQuality[]): LxQuality | undefined {
-  if (supported.length === 0) return undefined;
+export function getLxQualityCandidates(requestedQuality: string | undefined, supported: readonly LxQuality[], platform: MusicPlatform = 'netease'): LxQuality[] {
+  const available = supported;
+  if (available.length === 0 || requestedQuality === 'jyeffect') return [];
+  const fallback: LxQuality[] = ['flac', '320k', '128k'];
+  const candidates: LxQuality[] = [];
   if (requestedQuality === 'max') {
-    return [...LX_QUALITIES].reverse().find((quality) => supported.includes(quality));
-  }
-  if (requestedQuality === 'min') {
-    return LX_QUALITIES.find((quality) => supported.includes(quality));
+    const highest = [...LX_QUALITIES].reverse().find((quality) => available.includes(quality));
+    if (highest) candidates.push(highest);
+  } else if (requestedQuality === 'min') {
+    const lowest = LX_QUALITIES.find((quality) => available.includes(quality));
+    if (lowest) candidates.push(lowest);
+  } else if (requestedQuality === 'master') {
+    candidates.push('master');
+  } else if (requestedQuality === 'hires') {
+    candidates.push('hires');
+  } else if (requestedQuality === 'sky') {
+    candidates.push('atmos');
+  } else if (requestedQuality === 'standard') {
+    candidates.push('128k');
+  } else if (requestedQuality === 'exhigh' || requestedQuality === 'higher' || !requestedQuality) {
+    candidates.push('320k');
+  } else if (requestedQuality === 'lossless') {
+    candidates.push('flac');
+  } else {
+    candidates.push('320k');
   }
 
-  const target: LxQuality = LX_QUALITIES.includes(requestedQuality as LxQuality) ? requestedQuality as LxQuality : requestedQuality === 'standard'
-    ? '128k'
-    : requestedQuality === 'lossless'
-      ? 'flac'
-      : '320k';
-  const targetIndex = LX_QUALITIES.indexOf(target);
-
-  for (let index = targetIndex; index >= 0; index -= 1) {
-    const quality = LX_QUALITIES[index];
-    if (supported.includes(quality)) return quality;
+  if (requestedQuality === 'flac24bit') candidates[0] = 'flac24bit';
+  const highIndex = LX_QUALITIES.indexOf(candidates[0]);
+  if (requestedQuality !== 'sky' && highIndex > LX_QUALITIES.indexOf('flac')) {
+    return LX_QUALITIES.slice(0, highIndex + 1).reverse().filter(quality => quality !== 'atmos' && available.includes(quality));
   }
-  return undefined;
+  const baseIndex = fallback.indexOf(candidates[0]);
+  const lower = baseIndex >= 0 ? fallback.slice(baseIndex + 1) : fallback;
+  return [...new Set([...candidates, ...lower])].filter((quality) => available.includes(quality));
+}
+
+export function selectLxQuality(requestedQuality: string | undefined, supported: readonly LxQuality[], platform: MusicPlatform = 'netease'): LxQuality | undefined {
+  return getLxQualityCandidates(requestedQuality, supported, platform)[0];
 }
 
 export function mapLxQualityToTrackUrl(url: string, quality: LxQuality) {
+  if (quality === 'master') {
+    return { url, quality: 'master', format: '', bitrate: null, size: 0 };
+  }
+  if (quality === 'hires') {
+    return { url, quality: 'hires', format: '', bitrate: null, size: 0 };
+  }
+  if (quality === 'atmos') {
+    return { url, quality: 'sky', format: '', bitrate: null, size: 0 };
+  }
   if (quality === '128k') {
     return { url, quality: 'standard', format: '', bitrate: 128_000, size: 0 };
   }

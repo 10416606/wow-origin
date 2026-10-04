@@ -19,6 +19,8 @@ type StoredAccountRow = {
   stateless: string | null;
   use_luoxue: string | null;
   lx_source: string | null;
+  device_id: string | null;
+  device_state: string | null;
 };
 
 const SCHEMA = `
@@ -31,11 +33,13 @@ const SCHEMA = `
     stateless TEXT,
     use_luoxue TEXT,
     lx_source TEXT,
+    deviceId TEXT,
+    device_state TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
   CREATE INDEX IF NOT EXISTS accounts_access_key_idx ON accounts(api_access_key);
-  PRAGMA user_version = 1;
+  PRAGMA user_version = 2;
 `;
 
 function encode(value: unknown): string | null {
@@ -63,7 +67,9 @@ function accountValues(account: RawMusicAccount): Array<string | null> {
         : String(account.api_access_key),
     encode(account.stateless),
     encode(account.useLuoxue),
-    encode(account.lxSource)
+    encode(account.lxSource),
+    encode(account.deviceId),
+    encode(account.deviceState)
   ];
 }
 
@@ -75,7 +81,9 @@ function rowToAccount(row: StoredAccountRow): RawMusicAccount {
     api_access_key: row.api_access_key ?? undefined,
     stateless: decode(row.stateless),
     useLuoxue: decode(row.use_luoxue),
-    lxSource: decode(row.lx_source)
+    lxSource: decode(row.lx_source),
+    deviceId: decode(row.device_id),
+    deviceState: decode(row.device_state)
   };
 }
 
@@ -107,17 +115,20 @@ export class SqliteAccountStore implements AccountStore {
     this.database = new DatabaseSync(this.location);
     this.database.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
     this.database.exec(SCHEMA);
+    const columns = this.database.prepare('PRAGMA table_info(accounts)').all() as Array<{ name: string }>;
+    if (!columns.some(column => column.name === 'deviceId')) this.database.exec('ALTER TABLE accounts ADD COLUMN deviceId TEXT');
+    if (!columns.some(column => column.name === 'device_state')) this.database.exec('ALTER TABLE accounts ADD COLUMN device_state TEXT');
     this.insertStatement = this.database.prepare(`
       INSERT INTO accounts (
-        platform, name, cookie, api_access_key, stateless, use_luoxue, lx_source
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        platform, name, cookie, api_access_key, stateless, use_luoxue, lx_source, deviceId, device_state
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     this.migrateLegacyAccounts(workDir);
   }
 
   list(): RawMusicAccount[] {
     const rows = this.database.prepare(`
-      SELECT id, platform, name, cookie, api_access_key, stateless, use_luoxue, lx_source
+      SELECT id, platform, name, cookie, api_access_key, stateless, use_luoxue, lx_source, deviceId AS device_id, device_state
       FROM accounts
       ORDER BY id ASC
     `).all() as unknown as StoredAccountRow[];
@@ -130,7 +141,7 @@ export class SqliteAccountStore implements AccountStore {
 
   update(apiAccessKey: string, changes: Partial<RawMusicAccount>): void {
     const row = this.database.prepare(`
-      SELECT id, platform, name, cookie, api_access_key, stateless, use_luoxue, lx_source
+      SELECT id, platform, name, cookie, api_access_key, stateless, use_luoxue, lx_source, deviceId AS device_id, device_state
       FROM accounts
       WHERE api_access_key = ?
       ORDER BY id ASC
@@ -142,7 +153,7 @@ export class SqliteAccountStore implements AccountStore {
     this.database.prepare(`
       UPDATE accounts
       SET platform = ?, name = ?, cookie = ?, api_access_key = ?, stateless = ?,
-          use_luoxue = ?, lx_source = ?, updated_at = CURRENT_TIMESTAMP
+          use_luoxue = ?, lx_source = ?, deviceId = ?, device_state = ?, updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(...accountValues(account), row.id);
   }

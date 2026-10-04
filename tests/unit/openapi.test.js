@@ -5,6 +5,7 @@ jest.mock('../../dist/onload', () => ({
 }))
 
 const { MultiPlatformServer } = require('../../dist/app')
+const { preloadData } = require('../../dist/onload')
 const originalNodeEnv = process.env.NODE_ENV
 
 async function createApp(nodeEnv = 'development') {
@@ -14,8 +15,20 @@ async function createApp(nodeEnv = 'development') {
 }
 
 describe('OpenAPI documentation', () => {
+  beforeEach(() => {
+    preloadData.mockResolvedValue(undefined)
+  })
+
   afterEach(() => {
     process.env.NODE_ENV = originalNodeEnv
+  })
+
+  test('账号收藏预加载未完成时仍可初始化 HTTP 应用', async () => {
+    preloadData.mockImplementationOnce(() => new Promise(() => {}))
+    const app = await new MultiPlatformServer().initialize()
+
+    await request(app).get('/openapi.json').expect(200)
+    expect(preloadData).toHaveBeenCalledTimes(1)
   })
 
   test('GET /openapi.json returns the v1 contract and shared schemas', async () => {
@@ -47,6 +60,10 @@ describe('OpenAPI documentation', () => {
     expect(response.body.paths['/v1/track/lyric'].get.deprecated).toBe(true)
     expect(response.body.paths).toHaveProperty('/v1/artist/detail')
     expect(response.body.paths).toHaveProperty('/v1/album/detail')
+    expect(response.body.paths).toHaveProperty('/v1/artist/favorite')
+    expect(response.body.paths).toHaveProperty('/v1/album/favorite')
+    expect(response.body.paths).toHaveProperty('/v1/user/artist/list')
+    expect(response.body.paths).toHaveProperty('/v1/user/album/list')
     expect(response.body.paths).toHaveProperty('/v1/search/tracks')
     expect(response.body.paths).not.toHaveProperty('/v1/metadata/match')
     expect(response.body.paths).not.toHaveProperty('/v1/source/status')

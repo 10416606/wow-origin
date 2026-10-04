@@ -1,20 +1,28 @@
-import type { ResolveWowContext, TrackUrl, WowAdapter } from 'aduoer-wow-sdk';
+import type { ResolveWowContext, TrackUrl } from 'aduoer-wow-sdk';
 import { type AccountSessionRegistry, type MusicAccountSession, extractAuthorizationToken } from './accounts';
 import { NeteaseClient } from './clients/NeteaseClient';
 import { QQClient } from './clients/QQClient';
+import { YTMusicClient } from './clients/YTMusicClient';
 import { getQualityOptions } from './quality';
+import { collectionStatusNeeded } from './collectionStatus';
 import type { MusicPlatform } from './types';
 import type { LxTrackUrlResolver } from './lx-resource';
+import { createStreamUrl } from './ytmusic/stream';
 
 /** 根据私有平台账号创建符合公开 SDK 契约的 Adapter。 */
 export function createMusicClient(
   platform: MusicPlatform,
   cookie: string,
-  favoriteTrackIds?: Set<string>
-): QQClient | NeteaseClient {
-  return platform === 'qq'
-    ? new QQClient(cookie, favoriteTrackIds)
-    : new NeteaseClient(cookie, favoriteTrackIds);
+  favoriteTrackIds?: Set<string>,
+  favoriteArtistIds?: Set<string>,
+  favoriteAlbumIds?: Set<string>,
+  userPlaylistIds?: Set<string>
+): QQClient | NeteaseClient | YTMusicClient {
+  return platform === 'ytmusic'
+    ? new YTMusicClient(cookie, favoriteTrackIds, favoriteArtistIds, favoriteAlbumIds, userPlaylistIds)
+    : platform === 'qq'
+    ? new QQClient(cookie, favoriteTrackIds, favoriteArtistIds, favoriteAlbumIds, userPlaylistIds)
+    : new NeteaseClient(cookie, favoriteTrackIds, favoriteArtistIds, favoriteAlbumIds, userPlaylistIds);
 }
 
 function hasValidAudioUrl(trackUrl: TrackUrl | undefined): trackUrl is TrackUrl {
@@ -29,10 +37,26 @@ function hasValidAudioUrl(trackUrl: TrackUrl | undefined): trackUrl is TrackUrl 
 
 export function createAdapter(
   account: MusicAccountSession,
-  lxTrackUrlResolver?: LxTrackUrlResolver
-): WowAdapter {
-  const client = createMusicClient(account.platform, account.cookie, account.favoriteTrackIds);
-  if (account.useLuoxue === false || !lxTrackUrlResolver) return client;
+  lxTrackUrlResolver?: LxTrackUrlResolver,
+  streamOrigin?: string
+): QQClient | NeteaseClient | YTMusicClient {
+  const client = createMusicClient(account.platform, account.cookie, account.favoriteTrackIds, account.favoriteArtistIds, account.favoriteAlbumIds, account.userPlaylistIds);
+  if (client instanceof YTMusicClient && streamOrigin) {
+    client.setStreamUrl((id, quality) => createStreamUrl(streamOrigin, account, id, quality));
+  }
+  const userArtists = client.userArtists.bind(client);
+  client.userArtists = async () => {
+    const artists = await userArtists();
+    account.favoriteArtistsLoaded = true;
+    return artists;
+  };
+  const userAlbums = client.userAlbums.bind(client);
+  client.userAlbums = async () => {
+    const albums = await userAlbums();
+    account.favoriteAlbumsLoaded = true;
+    return albums;
+  };
+  if (account.platform === 'ytmusic' || account.useLuoxue === false || !lxTrackUrlResolver) return client;
 
   const defaultGetTrackUrl = client.getTrackUrl.bind(client);
   const defaultGetTrackDetail = client.getTrackDetail.bind(client);
@@ -48,6 +72,7 @@ export function createAdapter(
     };
   }
   const getLxTrackUrl = async (id: string, quality?: string): Promise<TrackUrl | undefined> => {
+    if (account.platform === 'netease' && quality === 'jyeffect') return undefined;
     try {
       const lxTrackUrl = account.lxSource?.length
         ? await lxTrackUrlResolver.resolveTrackUrl(account.platform, id, quality, account.lxSource)
@@ -65,7 +90,7 @@ export function createAdapter(
   client.getTrackUrl = async (id: string, quality?: string) => {
     const lxTrackUrl = await getLxTrackUrl(id, quality);
     if (lxTrackUrl) return lxTrackUrl;
-    return defaultGetTrackUrl(id, ['flac24bit', 'hires', 'master'].includes(quality || '') ? 'max' : quality);
+    return defaultGetTrackUrl(id, account.platform === 'qq' && ['flac24bit', 'hires', 'master'].includes(quality || '') ? 'max' : quality);
   };
   return client;
 }
@@ -75,17 +100,41 @@ export function createWowContextResolver(
   registry: AccountSessionRegistry,
   lxTrackUrlResolver?: LxTrackUrlResolver
 ): ResolveWowContext {
-  return ({ authorization }) => {
+  return async ({ authorization, request }) => {
     const token = extractAuthorizationToken(authorization);
     const account = token ? registry.byAccessKey.get(token) : undefined;
     if (!account) return null;
 
+    const header = (name: string): string | undefined =>
+      typeof request?.header === 'function' ? request.header(name) : undefined;
+    const forwardedProtocol = String(header('x-forwarded-proto') || '').split(',')[0];
+    const protocol = forwardedProtocol === 'https' ? 'https' : request?.protocol === 'https' ? 'https' : 'http';
+    const host = header('host');
+    const origin = host && /^[a-zA-Z0-9.:-]+$/.test(host) ? `${protocol}://${host}` : undefined;
+    const adapter = createAdapter(account, lxTrackUrlResolver, origin);
+    const needed = collectionStatusNeeded(request?.path || '');
+    if (needed.artists && !account.favoriteArtistsLoaded) {
+      try {
+        await adapter.userArtists();
+        account.favoriteArtistsLoaded = true;
+      } catch {
+        // 保留已有集合；下一次需要状态时重试。
+      }
+    }
+    if (needed.albums && !account.favoriteAlbumsLoaded) {
+      try {
+        await adapter.userAlbums();
+        account.favoriteAlbumsLoaded = true;
+      } catch {
+        // 保留已有集合；下一次需要状态时重试。
+      }
+    }
     return {
-      adapter: createAdapter(account, lxTrackUrlResolver),
-      qualityMap: [
+      adapter,
+      qualityMap: [...new Map([
         ...getQualityOptions(account.platform),
         ...(account.useLuoxue !== false ? lxTrackUrlResolver?.getQualityOptions?.(account.platform) || [] : [])
-      ],
+      ].map(option => [option.key, option])).values()],
       accountName: account.name,
       stateless: account.stateless
     };

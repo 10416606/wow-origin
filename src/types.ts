@@ -1,7 +1,7 @@
 import { UnsupportedFeatureError } from './errors';
 
 /** wow-origin 私有的平台标识，不属于公开 Wow 协议。 */
-export type MusicPlatform = 'qq' | 'netease';
+export type MusicPlatform = 'qq' | 'netease' | 'ytmusic';
 
 /** 上游歌词映射时使用的内部结构，不作为 Wow API 响应。 */
 export interface Lyrics {

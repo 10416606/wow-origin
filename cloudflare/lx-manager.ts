@@ -9,7 +9,7 @@ import type { LxPlatform, LxQuality } from '../src/lx-resource/types';
 import { bundledLxSource, installBundledLxSource } from './generated/lx-source';
 
 const EVENT_NAMES = { request: 'request', inited: 'inited', updateAlert: 'updateAlert' } as const;
-const QUALITIES: LxQuality[] = ['128k', '320k', 'flac', 'flac24bit', 'hires', 'master'];
+const QUALITIES: LxQuality[] = ['128k', '320k', 'flac', 'flac24bit', 'hires', 'atmos', 'master'];
 
 type SourceCapability = { actions: string[]; qualities: LxQuality[] };
 type RequestHandler = (input: Record<string, unknown>) => unknown;
@@ -17,7 +17,7 @@ type RequestHandler = (input: Record<string, unknown>) => unknown;
 function selectQuality(requested: string | undefined, supported: readonly LxQuality[]): LxQuality | undefined {
   if (requested === 'max') return [...QUALITIES].reverse().find((item) => supported.includes(item));
   if (requested === 'min') return QUALITIES.find((item) => supported.includes(item));
-  const target: LxQuality = QUALITIES.includes(requested as LxQuality) ? requested as LxQuality
+  const target: LxQuality = requested === 'sky' ? 'atmos' : QUALITIES.includes(requested as LxQuality) ? requested as LxQuality
     : requested === 'standard' ? '128k' : requested === 'lossless' ? 'flac' : '320k';
   for (let index = QUALITIES.indexOf(target); index >= 0; index -= 1) {
     if (supported.includes(QUALITIES[index])) return QUALITIES[index];
@@ -41,7 +41,7 @@ function trackUrl(url: string, quality: LxQuality): TrackUrl {
   }
   if (quality === '128k') return { url, quality: 'standard', format: '', bitrate: 128_000, size: 0 };
   if (quality === '320k') return { url, quality: 'exhigh', format: '', bitrate: 320_000, size: 0 };
-  return { url, quality: quality === 'flac' ? 'lossless' : quality, format: '', bitrate: null, size: 0 };
+  return { url, quality: quality === 'flac' ? 'lossless' : quality === 'atmos' ? 'sky' : quality, format: '', bitrate: null, size: 0 };
 }
 
 class UnavailableAudioError extends Error {}
@@ -201,6 +201,58 @@ function zlibCall(method: 'inflate' | 'deflate', input: Uint8Array): Promise<Buf
 export class CloudflareLxSourceManager implements AppLxSourceManager {
   private requestHandler?: RequestHandler;
   private readonly capabilities: Partial<Record<LxPlatform, SourceCapability>> = {};
+  private readonly qqMetadata = new Map<string, { expires: number; value: Promise<Record<string, any> | undefined> }>();
+
+  // The QQ catalogue provides sizes even when Workers cannot read the audio
+  // CDN. Cache public metadata only; never store signed playback URLs here.
+  private getQQMetadata(id: string): Promise<Record<string, any> | undefined> {
+    const cached = this.qqMetadata.get(id);
+    if (cached && cached.expires > Date.now()) return cached.value;
+    const value = (async () => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 4000);
+      try {
+        const response = await fetch('https://u.y.qq.com/cgi-bin/musicu.fcg', {
+          method: 'POST', signal: controller.signal,
+          headers: { 'Content-Type': 'application/json', Referer: 'https://y.qq.com/' },
+          body: JSON.stringify({ comm: { ct: 24, cv: 0 }, req: {
+            module: 'music.pf_song_detail_svr', method: 'get_song_detail_yqq',
+            param: { song_mid: id, song_type: 0, song_id: 0 }
+          } })
+        });
+        if (!response.ok) { void response.body?.cancel(); return undefined; }
+        const data = await response.json() as any;
+        const track = data?.req?.data?.track_info;
+        return track?.mid === id ? track.file : undefined;
+      } catch { return undefined; }
+      finally { clearTimeout(timer); }
+    })();
+    if (this.qqMetadata.size >= 256) this.qqMetadata.delete(this.qqMetadata.keys().next().value!);
+    this.qqMetadata.set(id, { expires: Date.now() + 300_000, value });
+    return value;
+  }
+
+  private async inspectTrack(platform: MusicPlatform, id: string, track: TrackUrl, timeout: number): Promise<TrackUrl> {
+    const url = new URL(track.url);
+    const knownQQ = url.hostname === 'aqqmusic.tc.qq.com'
+      || (isIP(url.hostname) !== 0 && url.pathname.startsWith('/amobile.music.tc.qq.com/'));
+    // Associate sizes only with the matching QQ file encoding. In particular,
+    // SQ size must never be shown for an AI00 master file or a third-party file.
+    const file = url.pathname.split('/').pop() || '';
+    const sizeField = track.quality === 'master' && /^AI00[A-Za-z0-9]+\.flac$/.test(file) ? 'master'
+      : track.quality === 'lossless' && /^F000[A-Za-z0-9]+\.flac$/.test(file) ? 'size_flac'
+      : ['hires', 'flac24bit'].includes(track.quality) && /^RS01[A-Za-z0-9]+\.flac$/.test(file) ? 'size_hires'
+      : track.quality === 'exhigh' && /^M800[A-Za-z0-9]+\.mp3$/.test(file) ? 'size_320mp3'
+      : track.quality === 'standard' && /^M500[A-Za-z0-9]+\.mp3$/.test(file) ? 'size_128mp3' : undefined;
+    const [audio, metadata] = await Promise.all([
+      inspectAudio(track, timeout),
+      platform === 'qq' && knownQQ && sizeField ? this.getQQMetadata(id) : undefined
+    ]);
+    if (audio.size > 0 || !metadata || !sizeField) return audio;
+    const size = Number(sizeField === 'master' ? metadata.size_new?.[0] : metadata[sizeField]);
+    if (!Number.isSafeInteger(size) || size <= 0) return audio;
+    return { ...audio, size, format: file.endsWith('.flac') ? 'flac' : 'mp3' };
+  }
 
   constructor() {
     if (!bundledLxSource.enabled) return;
@@ -263,9 +315,9 @@ export class CloudflareLxSourceManager implements AppLxSourceManager {
     const options = this.getQualityOptions(platform).filter(({ key }) => key !== 'max');
     const results = await Promise.all(options.map(async ({ key, label }) => {
       try {
-        const result = await this.resolveQuality(platform, id, key as LxQuality, 8000);
+        const result = await this.resolveQuality(platform, id, (key === 'sky' ? 'atmos' : key) as LxQuality, 8000);
         if (!result) return [];
-        const audio = await inspectAudio(result, 6000);
+        const audio = await this.inspectTrack(platform, id, result, 6000);
         return [{ key, label, size: audio.size, format: audio.format, bitrate: audio.bitrate }];
       } catch {
         return [];
@@ -275,10 +327,11 @@ export class CloudflareLxSourceManager implements AppLxSourceManager {
   }
   getQualityOptions(platform: MusicPlatform) {
     const supported = this.capabilities[platform === 'qq' ? 'tx' : 'wy']?.qualities || [];
-    const labels = { flac24bit: '24 位无损', hires: 'Hi-Res 高解析', master: '母带' };
+    if (platform === 'ytmusic') return [];
+    const labels = { flac24bit: '24 位无损', hires: 'Hi-Res 高解析', atmos: '沉浸环绕声', master: '母带' };
     return [
       ...(Object.keys(labels) as (keyof typeof labels)[])
-        .filter((key) => supported.includes(key)).map((key) => ({ key, label: labels[key] })),
+        .filter((key) => supported.includes(key)).map((key) => ({ key: key === 'atmos' ? 'sky' : key, label: labels[key] })),
       ...(supported.length ? [{ key: 'max', label: '自动最高音质（失败逐级降级）' }] : [])
     ];
   }
@@ -287,6 +340,7 @@ export class CloudflareLxSourceManager implements AppLxSourceManager {
   async stop(): Promise<void> {}
 
   async resolveTrackUrl(platform: MusicPlatform, id: string, requestedQuality?: string): Promise<TrackUrl | undefined> {
+    if (platform === 'ytmusic' || requestedQuality === 'jyeffect') return undefined;
     const supported = this.capabilities[platform === 'qq' ? 'tx' : 'wy']?.qualities || [];
     const selected = selectQuality(requestedQuality, supported);
     if (!selected) return undefined;
@@ -298,7 +352,7 @@ export class CloudflareLxSourceManager implements AppLxSourceManager {
       if (remaining <= 0) break;
       try {
         const result = await this.resolveQuality(platform, id, quality, Math.min(8000, remaining));
-        if (result) return await inspectAudio(result, Math.min(6000, Math.max(1, deadline - Date.now())));
+        if (result) return await this.inspectTrack(platform, id, result, Math.min(6000, Math.max(1, deadline - Date.now())));
       } catch {
         // Try a lower supported quality; never log private source URLs.
       }

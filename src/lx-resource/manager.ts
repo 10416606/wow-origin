@@ -8,10 +8,10 @@ import {
   getLxSourceCacheDirectory,
   getLxSourceCachePath,
   createLxSourceConfigs,
+  getLxQualityCandidates,
   mapLxQualityToTrackUrl,
   mapMusicPlatformToLx,
   parseLxScriptInfo,
-  selectLxQuality,
   sourceLabel
 } from './config';
 import { LxSourceRuntime } from './runtime';
@@ -146,25 +146,26 @@ export class LxSourceManager implements LxTrackUrlResolver, LxSourceLifecycle {
       const source = this.sources.get(config.hash);
       const capability = source?.capabilities[lxPlatform];
       if (!source || !capability) continue;
-      const lxQuality = selectLxQuality(quality, capability.qualities);
-      if (!lxQuality) continue;
-
-      try {
-        const result = await source.runtime.invoke({
-          source: lxPlatform,
-          quality: lxQuality,
-          timeoutMs: Math.min(SOURCE_REQUEST_TIMEOUT_MS, remaining),
-          musicInfo: {
-            id,
-            songmid: id,
-            ...(lxPlatform === 'tx' ? { strMediaMid: id } : {}),
+      for (const lxQuality of getLxQualityCandidates(quality, capability.qualities, platform)) {
+        const candidateRemaining = deadline - Date.now();
+        if (candidateRemaining <= 0) break;
+        try {
+          const result = await source.runtime.invoke({
             source: lxPlatform,
-            types: capability.qualities.map((type) => ({ type, size: null }))
-          }
-        });
-        return mapLxQualityToTrackUrl(validateAudioUrl(result), lxQuality);
-      } catch (error) {
-        this.log('warn', source.name, config.hash, `获取音频失败: ${safeErrorMessage(error)}`);
+            quality: lxQuality,
+            timeoutMs: Math.min(SOURCE_REQUEST_TIMEOUT_MS, candidateRemaining),
+            musicInfo: {
+              id,
+              songmid: id,
+              ...(lxPlatform === 'tx' ? { strMediaMid: id } : {}),
+              source: lxPlatform,
+              types: capability.qualities.map((type) => ({ type, size: null }))
+            }
+          });
+          return mapLxQualityToTrackUrl(validateAudioUrl(result), lxQuality);
+        } catch (error) {
+          this.log('warn', source.name, config.hash, `获取音频失败: ${safeErrorMessage(error)}`);
+        }
       }
     }
     return undefined;

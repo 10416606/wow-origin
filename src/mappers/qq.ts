@@ -95,7 +95,7 @@ export function mapAlbum(album: any = {}): Album {
     name: album.name || '',
     coverUrl: coverUrl || '',
     artistName,
-    publishTime: new Date(album.publishTime || album.publishDate || 0).getTime() || null,
+    publishTime: normalizeTimestamp(album.publishTime || album.publishDate || album.createTime),
   };
 }
 

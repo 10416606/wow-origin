@@ -7,6 +7,7 @@
  * - eapiResDecrypt / eapiReqDecrypt：eapi 返回值/请求体解析辅助
  */
 const crypto = require('crypto')
+const zlib = require('zlib')
 
 const iv = '0102030405060708'
 
@@ -24,6 +25,9 @@ MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDgtQn2JZ34ZC28NWYpAUd98iZ37BUrX/aKzmFbt7cl
 //eapi AES-ECB 使用的固定密钥
 
 const eapiKey = 'e82ckenh8dichen8'
+const xeapiStaticKey = Buffer.from('ab1d5a430f6bb04a3f01e81ddd72bd916d5ce591248ac128714806d7f8fb1b84', 'hex')
+const xeapiSignKey = 'mUHCwVNWJbunMqAHf5MImuirT6plvs6VSFW62MGHstFQxhBGdEoIhLItH3djc4+FB/OKty3+lL2rGeoFBpVe5g=='
+const x25519SpkiPrefix = Buffer.from('302a300506032b656e032100', 'hex')
 
 /**
  * 通用 AES 加密
@@ -168,6 +172,82 @@ const eapiReqDecrypt = (encryptedParams) => {
   return null
 }
 
+const aesEcbBuffer = (key, input, decrypt = false) => {
+  const cipher = decrypt
+    ? crypto.createDecipheriv(`aes-${key.length * 8}-ecb`, key, Buffer.alloc(0))
+    : crypto.createCipheriv(`aes-${key.length * 8}-ecb`, key, Buffer.alloc(0))
+  return Buffer.concat([cipher.update(input), cipher.final()])
+}
+
+const xeapiSign = (timestamp, nonce) => crypto.createHmac('sha256', xeapiSignKey)
+  .update(String(timestamp) + nonce).digest('base64')
+
+const xeapiDecryptPublicKey = (encryptedData) => JSON.parse(
+  aesEcbBuffer(xeapiStaticKey, Buffer.from(encryptedData, 'base64'), true).toString()
+)
+
+const xeapi = (uri, data, options = {}) => {
+  const publicKeyState = options.publicKeyState
+  if (!publicKeyState) throw new Error('xeapi publicKeyState is required')
+  const bodyData = { ...data }
+  delete bodyData.e_r
+  const body = new URLSearchParams(bodyData).toString()
+  const queryString = new URL(uri, 'https://interface.music.163.com').search.slice(1)
+  const plaintext = Buffer.from(JSON.stringify({
+    ...(body ? { content: body } : {}),
+    queryString: queryString ? `${queryString}&e_r=true` : 'e_r=true'
+  }))
+  const sessionKey = options.sessionKey ? Buffer.from(String(options.sessionKey)) : null
+  const dynamicKey = sessionKey || crypto.randomBytes(16)
+  const first = aesEcbBuffer(xeapiStaticKey, plaintext)
+  const random = crypto.randomBytes(16)
+  const xored = Buffer.from(first.map((byte, index) => byte ^ random[index & 15]))
+  const rotation = xored.length ? (random[0] & 15) % xored.length : 0
+  const middle = Buffer.concat([random, xored.subarray(rotation), xored.subarray(0, rotation)])
+  const C = aesEcbBuffer(dynamicKey, middle)
+
+  let ephemeral
+  let shared
+  if (typeof crypto.generateKeyPairSync === 'function' && typeof crypto.diffieHellman === 'function') {
+    const peerKey = crypto.createPublicKey({
+      key: Buffer.concat([x25519SpkiPrefix, Buffer.from(publicKeyState.publicKey, 'base64')]),
+      format: 'der', type: 'spki'
+    })
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('x25519')
+    ephemeral = Buffer.from(publicKey.export({ format: 'der', type: 'spki' })).subarray(-32)
+    shared = crypto.diffieHellman({ privateKey, publicKey: peerKey })
+  } else {
+    // 浏览器脚本运行时没有 Node 的 X25519 密钥 API。
+    const { x25519 } = require('@noble/curves/ed25519.js')
+    const privateKey = crypto.randomBytes(32)
+    ephemeral = Buffer.from(x25519.getPublicKey(privateKey))
+    shared = Buffer.from(x25519.getSharedSecret(privateKey, Buffer.from(publicKeyState.publicKey, 'base64')))
+  }
+  const prk = crypto.createHmac('sha256', Buffer.alloc(32)).update(shared).digest()
+  const aesKey = crypto.createHmac('sha256', prk)
+    .update(Buffer.concat([ephemeral, Buffer.from([1])])).digest().subarray(0, 16)
+  const iv = crypto.randomBytes(12)
+  const seal = crypto.createCipheriv('aes-128-gcm', aesKey, iv)
+  const sealed = Buffer.concat([
+    seal.update(Buffer.from(`${dynamicKey.toString('base64')}|${options.os || 'android'}|${publicKeyState.sk || ''}`)),
+    seal.final()
+  ])
+  const S = Buffer.concat([ephemeral, iv, sealed, seal.getAuthTag()])
+  const R = aesEcbBuffer(xeapiStaticKey, Buffer.from(`${publicKeyState.version}|${sessionKey ? options.sessionId || '' : ''}`))
+  return {
+    C: C.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
+    S: S.toString('base64'),
+    R: R.toString('base64')
+  }
+}
+
+const xeapiResDecrypt = (body) => {
+  const decrypted = aesEcbBuffer(Buffer.from(eapiKey), Buffer.from(body), true)
+  const plain = decrypted[0] === 0x1f && decrypted[1] === 0x8b
+    ? zlib.gunzipSync(decrypted) : decrypted
+  return JSON.parse(plain.toString())
+}
+
 module.exports = {
   weapi,
   eapi,
@@ -176,4 +256,8 @@ module.exports = {
   eapiReqDecrypt,
   eapiResDecrypt,
   eapiResDecryptBuffer,
+  xeapi,
+  xeapiSign,
+  xeapiDecryptPublicKey,
+  xeapiResDecrypt,
 }

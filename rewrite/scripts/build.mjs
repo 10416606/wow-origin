@@ -22,6 +22,7 @@ const aliases = new Map([
   ['axios', path.join(rewriteDirectory, 'shims', 'axios.ts')],
   ['crypto', path.join(rewriteDirectory, 'shims', 'crypto.ts')],
   ['node:crypto', path.join(rewriteDirectory, 'shims', 'crypto.ts')],
+  ['zlib', path.join(rewriteDirectory, 'shims', 'zlib.ts')],
   ['http', path.join(rewriteDirectory, 'shims', 'agents.ts')],
   ['https', path.join(rewriteDirectory, 'shims', 'agents.ts')],
   ['path', path.join(rewriteDirectory, 'shims', 'path.ts')],

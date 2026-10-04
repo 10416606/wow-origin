@@ -117,12 +117,15 @@
   function setPlatform(platform) {
     state.platform = platform;
     document.querySelectorAll('#platform-switch button').forEach((button) => button.classList.toggle('active', button.dataset.platform === platform));
-    $('scan-platform-label').textContent = platform === 'qq' ? 'QQ 音乐' : '网易云音乐';
+    $('scan-platform-label').textContent = platformLabel(platform);
     document.querySelectorAll('#login-methods button').forEach((button) => {
       const method = button.dataset.method;
-      button.classList.toggle('hidden', method === state.method);
+      button.classList.toggle('hidden', method === state.method || (platform === 'ytmusic' && method !== 'cookie'));
     });
+    $('account-luoxue').disabled = platform === 'ytmusic';
+    $('ytmusic-cookie-help').classList.toggle('hidden', platform !== 'ytmusic');
   }
+  function platformLabel(platform) { return platform === 'qq' ? 'QQ 音乐' : platform === 'ytmusic' ? 'YouTube Music' : '网易云音乐'; }
   function showError(error) { $('login-error').textContent = error.message || String(error); }
 
   async function verifyAccount() {
@@ -184,6 +187,7 @@
     $('regenerate-qr').classList.toggle('hidden', method !== 'qr');
   }
   function selectLoginMethod(method) {
+    if (state.platform === 'ytmusic') method = 'cookie';
     if (method === 'qr') startScan(); else prepareLogin(method);
   }
   function updatePhoneCooldown() {
@@ -236,7 +240,8 @@
   function showAccount(account) {
     stopPolling(); state.account = account; state.mode = 'update'; state.platform = account.platform;
     clearLoginInputs();
-    $('account-platform').textContent = account.platform === 'qq' ? 'QQ 音乐' : '网易云音乐';
+    setPlatform(account.platform);
+    $('account-platform').textContent = platformLabel(account.platform);
     $('account-key').textContent = account.apiAccessKey; $('account-name').value = account.name || account.accountName || '';
     $('account-stateless').checked = Boolean(account.stateless); $('account-luoxue').checked = account.useLuoxue !== false;
     applyRuntimeCapabilities();
@@ -320,13 +325,13 @@
     accounts.forEach((account) => {
       const button = document.createElement('button'); button.type = 'button'; button.className = 'account-nav-item';
       button.dataset.accountKey = account.apiAccessKey; button.textContent = account.name;
-      button.title = `${account.name} · ${account.platform === 'qq' ? 'QQ 音乐' : '网易云音乐'}`;
+      button.title = `${account.name} · ${platformLabel(account.platform)}`;
       button.addEventListener('click', () => openDesktopAccount(account.apiAccessKey)); list.append(button);
     });
     updateAccountNavigationActive();
   }
   function applyRuntimeCapabilities() {
-    const supported = state.status?.accountLxSources !== false;
+    const supported = state.status?.accountLxSources !== false && state.account?.platform !== 'ytmusic';
     $('account-lx-source-settings').classList.toggle('hidden', !supported);
   }
 
@@ -359,6 +364,7 @@
     try {
       const lxSource = state.status?.accountLxSources === false
         ? []
+        : state.account?.platform === 'ytmusic' ? []
         : [...document.querySelectorAll('#lx-source-list input')].map((input) => input.value.trim()).filter(Boolean);
       const account = await jsonRequest('/login/api/account/config', 'PUT', {
         api_access_key: state.account.apiAccessKey, name: $('account-name').value.trim(),
@@ -389,7 +395,8 @@
   $('phone-login-panel').addEventListener('submit', (event) => { event.preventDefault(); submitManualLogin('phone'); });
   $('cookie-login-panel').addEventListener('submit', (event) => { event.preventDefault(); submitManualLogin('cookie'); });
   $('scan-back').addEventListener('click', () => state.account ? showAccount(state.account) : backToChoose());
-  $('regenerate-qr').addEventListener('click', startScan); $('relogin').addEventListener('click', startScan);
+  $('regenerate-qr').addEventListener('click', startScan);
+  $('relogin').addEventListener('click', () => selectLoginMethod(state.account?.platform === 'ytmusic' ? 'cookie' : 'qr'));
   $('add-lx-source').addEventListener('click', () => addSourceInput()); $('save-config').addEventListener('click', saveConfig);
   $('retry-backend').addEventListener('click', async () => { try { await window.__TAURI__.core.invoke('restart_backend'); initializeBackend(); } catch (error) { $('splash-message').textContent = error.message; } });
   initializeBackend();

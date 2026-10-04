@@ -11,6 +11,8 @@ export interface RawMusicAccount {
   stateless?: unknown;
   useLuoxue?: unknown;
   lxSource?: unknown;
+  deviceId?: unknown;
+  deviceState?: unknown;
 }
 
 export interface MusicAccountSession {
@@ -21,7 +23,29 @@ export interface MusicAccountSession {
   stateless: boolean;
   useLuoxue: boolean;
   lxSource: string[];
+  deviceId?: string;
+  deviceState?: string;
   favoriteTrackIds: Set<string>;
+  userPlaylistIds: Set<string>;
+  favoriteArtistIds: Set<string>;
+  favoriteAlbumIds: Set<string>;
+  favoriteArtistsLoaded: boolean;
+  favoriteAlbumsLoaded: boolean;
+}
+
+const qqAndroid = require('../platforms/qqmusic/util/android-login');
+
+function qqMusicid(cookie: string): string {
+  const value = String(cookie || '').split(';').map(item => item.trim()).find(item => item.startsWith('uin='));
+  return value ? value.slice(4).replace(/^o/, '') : '';
+}
+
+function qqDeviceFields(cookie: string): { deviceId?: string; deviceState?: string } {
+  const musicid = qqMusicid(cookie);
+  const context = musicid && qqAndroid.peekAndroidLoginContext(musicid);
+  if (!context) return {};
+  const deviceState = qqAndroid.encodeIdentity(context);
+  return { deviceId: qqAndroid.deviceIdFromIdentity(deviceState), deviceState };
 }
 
 export interface AccountSessionRegistry {
@@ -80,6 +104,7 @@ export function normalizeAccountPlatform(value: unknown): MusicPlatform {
   const platform = String(value || '').trim().toLowerCase();
   if (platform === 'qq') return 'qq';
   if (platform === 'netease') return 'netease';
+  if (platform === 'ytmusic' || platform === 'youtube-music') return 'ytmusic';
   throw new Error(`不支持的平台: ${platform || '<empty>'}`);
 }
 
@@ -236,7 +261,9 @@ export function loadAccountSessions(storeInput: AccountStoreInput = process.cwd(
       const platform = normalizeAccountPlatform(account.platform);
       const accountName = String(account.name || `${platform}-${index + 1}`).trim();
       const stateless = normalizeAccountStateless(account.stateless);
-      const useLuoxue = normalizeAccountUseLuoxue(account.useLuoxue);
+      const useLuoxue = platform === 'ytmusic' && account.useLuoxue === undefined
+        ? { value: false, invalid: false }
+        : normalizeAccountUseLuoxue(account.useLuoxue);
       if (useLuoxue.invalid) {
         console.warn(
           `[accounts] 账号 "${accountName}" 的 useLuoxue 必须是 boolean，已按 false 处理`
@@ -250,8 +277,19 @@ export function loadAccountSessions(storeInput: AccountStoreInput = process.cwd(
         stateless,
         useLuoxue: useLuoxue.value,
         lxSource: loadAccountLxSources(account.lxSource, accountName),
-        favoriteTrackIds: new Set<string>()
+        ...(account.deviceId ? { deviceId: String(account.deviceId) } : {}),
+        ...(account.deviceState ? { deviceState: String(account.deviceState) } : {}),
+        favoriteTrackIds: new Set<string>(),
+        userPlaylistIds: new Set<string>(),
+        favoriteArtistIds: new Set<string>(),
+        favoriteAlbumIds: new Set<string>(),
+        favoriteArtistsLoaded: false,
+        favoriteAlbumsLoaded: false
       });
+      if (platform === 'qq' && account.deviceState && qqAndroid.deviceIdFromIdentity(String(account.deviceState))) {
+        const musicid = qqMusicid(String(account.cookie || ''));
+        if (musicid) qqAndroid.getAndroidLoginContext(musicid, String(account.deviceState));
+      }
       keyCounts.set(apiAccessKey, (keyCounts.get(apiAccessKey) || 0) + 1);
     } catch (error) {
       console.warn(`[accounts] 忽略第 ${index + 1} 个账号：${(error as Error).message}`);
@@ -282,7 +320,8 @@ export function updateAccountCookieByAccessKey(
   platformValue: unknown,
   cookie: string,
   registry: AccountSessionRegistry,
-  storeInput: AccountStoreInput = process.cwd()
+  storeInput: AccountStoreInput = process.cwd(),
+  androidIdentity?: string
 ): UpdateAccountCookieResult {
   const token = String(apiAccessKey || '').trim();
   if (!token) {
@@ -321,10 +360,23 @@ export function updateAccountCookieByAccessKey(
   if (storedPlatform !== session.platform) {
     throw new Error('账号数据库中账号平台与当前会话不一致');
   }
+  const deviceFields = platform === 'qq' && androidIdentity
+    ? { deviceId: qqAndroid.deviceIdFromIdentity(androidIdentity), deviceState: androidIdentity }
+    : platform === 'qq'
+      ? {
+          ...(qqMusicid(normalizedCookie) !== qqMusicid(session.cookie)
+            ? { deviceId: undefined, deviceState: undefined } : {}),
+          ...qqDeviceFields(normalizedCookie)
+        }
+      : {};
+  if (platform === 'qq' && androidIdentity && !deviceFields.deviceId) {
+    throw new Error('QQ 刷新返回的设备状态无效');
+  }
   account.cookie = normalizedCookie;
-  store.update(token, { cookie: normalizedCookie });
+  store.update(token, { cookie: normalizedCookie, ...deviceFields });
 
   session.cookie = normalizedCookie;
+  Object.assign(session, deviceFields);
   registry.byAccessKey.set(token, session);
 
   return { session, filePath: store.location };
@@ -364,15 +416,16 @@ export function createAccountWithCookie(
   }
 
   const normalizedName = String(accountName || '').trim()
-    || (platform === 'qq' ? 'QQ 音乐' : '网易云音乐');
+    || (platform === 'qq' ? 'QQ 音乐' : platform === 'ytmusic' ? 'YouTube Music' : '网易云音乐');
   const account: RawMusicAccount = {
     platform,
     name: normalizedName,
     cookie: normalizedCookie,
     api_access_key: token,
     stateless: false,
-    useLuoxue: true,
-    lxSource: []
+    useLuoxue: platform !== 'ytmusic',
+    lxSource: [],
+    ...(platform === 'qq' ? qqDeviceFields(normalizedCookie) : {})
   };
   store.insert(account);
 
@@ -382,9 +435,16 @@ export function createAccountWithCookie(
     cookie: normalizedCookie,
     apiAccessKey: token,
     stateless: false,
-    useLuoxue: true,
+    useLuoxue: platform !== 'ytmusic',
     lxSource: [],
-    favoriteTrackIds: new Set<string>()
+    ...(account.deviceId ? { deviceId: String(account.deviceId) } : {}),
+    ...(account.deviceState ? { deviceState: String(account.deviceState) } : {}),
+    favoriteTrackIds: new Set<string>(),
+    userPlaylistIds: new Set<string>(),
+    favoriteArtistIds: new Set<string>(),
+    favoriteAlbumIds: new Set<string>(),
+    favoriteArtistsLoaded: false,
+    favoriteAlbumsLoaded: false
   };
   registry.sessions.push(session);
   registry.byAccessKey.set(token, session);

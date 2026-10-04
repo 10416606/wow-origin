@@ -1,5 +1,7 @@
 import { cbc, ecb, gcm } from '@noble/ciphers/aes.js';
 import { md5, sha1 } from '@noble/hashes/legacy.js';
+import { sha256 } from '@noble/hashes/sha2.js';
+import { hmac } from '@noble/hashes/hmac.js';
 import { Buffer } from 'buffer';
 
 type Encoding = BufferEncoding | undefined;
@@ -53,6 +55,23 @@ class Hash {
   }
 }
 
+class Hmac {
+  private readonly chunks: Buffer[] = [];
+
+  constructor(private readonly algorithm: string, private readonly key: Buffer) {}
+
+  update(value: string | ArrayBuffer | ArrayBufferView, encoding?: BufferEncoding): this {
+    this.chunks.push(bytes(value, encoding));
+    return this;
+  }
+
+  digest(encoding?: 'hex' | 'base64'): Buffer | string {
+    if (this.algorithm !== 'sha256') throw new Error(`Rewrite crypto: unsupported HMAC ${this.algorithm}`);
+    const output = Buffer.from(hmac(sha256, this.key, Buffer.concat(this.chunks)));
+    return encoding ? output.toString(encoding) : output;
+  }
+}
+
 class Cipher {
   private readonly chunks: Buffer[] = [];
   private authTag?: Buffer;
@@ -76,7 +95,7 @@ class Cipher {
       if (!this.iv) throw new Error('Rewrite crypto: CBC requires an IV');
       const instance = cbc(this.key, this.iv);
       output = this.decrypting ? instance.decrypt(input) : instance.encrypt(input);
-    } else if (this.algorithm === 'aes-128-ecb') {
+    } else if (this.algorithm === 'aes-128-ecb' || this.algorithm === 'aes-256-ecb') {
       const instance = ecb(this.key);
       output = this.decrypting ? instance.decrypt(input) : instance.encrypt(input);
     } else if (this.algorithm === 'aes-128-gcm') {
@@ -152,6 +171,10 @@ export function createHash(algorithm: string): Hash {
   return new Hash(algorithm);
 }
 
+export function createHmac(algorithm: string, key: string | ArrayBuffer | ArrayBufferView): Hmac {
+  return new Hmac(algorithm, bytes(key));
+}
+
 export function createCipheriv(
   algorithm: string,
   key: ArrayBuffer | ArrayBufferView,
@@ -198,6 +221,7 @@ export function publicEncrypt(
 const crypto = {
   constants,
   createHash,
+  createHmac,
   createCipheriv,
   createDecipheriv,
   publicEncrypt,

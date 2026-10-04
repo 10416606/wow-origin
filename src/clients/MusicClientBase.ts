@@ -1,4 +1,5 @@
 import type {
+  Album,
   AlbumDetail,
   AlbumPage,
   Artist,
@@ -28,11 +29,17 @@ export abstract class MusicClientBase implements WowAdapter {
   protected readonly cookie: string;
   protected readonly platform: MusicPlatform;
   protected readonly favoriteTrackSet: Set<string>;
+  protected readonly userPlaylistSet: Set<string>;
+  protected readonly favoriteArtistSet: Set<string>;
+  protected readonly favoriteAlbumSet: Set<string>;
 
-  constructor(cookie: string, platform: MusicPlatform, favoriteTrackSet?: Set<string>) {
+  constructor(cookie: string, platform: MusicPlatform, favoriteTrackSet?: Set<string>, favoriteArtistSet?: Set<string>, favoriteAlbumSet?: Set<string>, userPlaylistSet?: Set<string>) {
     this.cookie = cookie || '';
     this.platform = platform;
     this.favoriteTrackSet = favoriteTrackSet || new Set<string>();
+    this.userPlaylistSet = userPlaylistSet || new Set<string>();
+    this.favoriteArtistSet = favoriteArtistSet || new Set<string>();
+    this.favoriteAlbumSet = favoriteAlbumSet || new Set<string>();
   }
 
   protected unsupported(feature: string): never {
@@ -47,7 +54,7 @@ export abstract class MusicClientBase implements WowAdapter {
     return this.platform === 'qq' ? 'qqmusic' : this.platform;
   }
 
-  protected async callModule(route: string, query: Record<string, any> = {}, body: Record<string, any> = {}): Promise<any> {
+  protected async callModule(route: string, query: Record<string, any> = {}, body: Record<string, any> = {}, keepEnvelope = false): Promise<any> {
     const platformName = this.platformModuleName;
     const platform = this.platformFactory.getPlatform(platformName);
     const normalizedRoute = route.replace(/_/g, '/');
@@ -64,6 +71,7 @@ export abstract class MusicClientBase implements WowAdapter {
       throw new Error(response?.message || `${this.platform} ${route} request failed`);
     }
 
+    if (keepEnvelope) return response;
     if (response.body !== undefined) return response.body;
     if (response.data !== undefined) return response.data;
     const { code, ...data } = response;
@@ -95,12 +103,58 @@ export abstract class MusicClientBase implements WowAdapter {
     this.favoriteTrackSet.clear();
   }
 
+  protected replaceUserPlaylists(playlists: Playlist[]): void {
+    this.userPlaylistSet.clear();
+    playlists.forEach((playlist) => this.userPlaylistSet.add(playlist.id));
+  }
+
+  protected setUserPlaylist(id: string, status: boolean): void {
+    if (status) this.userPlaylistSet.add(id);
+    else this.userPlaylistSet.delete(id);
+  }
+
   protected withFavoriteTrack<T extends Track>(track: T): T {
     return { ...track, favorite: this.hasFavoriteTrack(track.id) } as T;
   }
 
   protected withFavoriteTracks<T extends Track>(tracks: T[]): T[] {
     return tracks.map((track) => this.withFavoriteTrack(track)) as T[];
+  }
+
+  protected hasFavoriteArtist(id: string): boolean {
+    return this.favoriteArtistSet.has(id);
+  }
+
+  protected hasFavoriteAlbum(id: string): boolean {
+    return this.favoriteAlbumSet.has(id);
+  }
+
+  protected setFavoriteArtist(id: string, status: boolean): void {
+    if (status) this.favoriteArtistSet.add(id);
+    else this.favoriteArtistSet.delete(id);
+  }
+
+  protected setFavoriteAlbum(id: string, status: boolean): void {
+    if (status) this.favoriteAlbumSet.add(id);
+    else this.favoriteAlbumSet.delete(id);
+  }
+
+  protected replaceFavoriteArtists(artists: Artist[]): void {
+    this.favoriteArtistSet.clear();
+    artists.forEach((artist) => this.favoriteArtistSet.add(artist.id));
+  }
+
+  protected replaceFavoriteAlbums(albums: Album[]): void {
+    this.favoriteAlbumSet.clear();
+    albums.forEach((album) => this.favoriteAlbumSet.add(album.id));
+  }
+
+  protected withFavoriteArtists<T extends Artist>(artists: T[]): T[] {
+    return artists.map((artist) => ({ ...artist, favorite: this.hasFavoriteArtist(artist.id) })) as T[];
+  }
+
+  protected withFavoriteAlbums<T extends Album>(albums: T[]): T[] {
+    return albums.map((album) => ({ ...album, favorite: this.hasFavoriteAlbum(album.id) })) as T[];
   }
 
   protected toArrayPayload<T = any>(value: any, keys: string[] = []): T[] {
@@ -115,6 +169,32 @@ export abstract class MusicClientBase implements WowAdapter {
       }
     }
     return [];
+  }
+
+  protected async loadSubscribedItems<T extends Artist | Album>(
+    fetchPage: (offset: number, limit: number) => Promise<any>,
+    mapItem: (item: any) => T,
+    limit: number = 100
+  ): Promise<T[]> {
+    const items: T[] = [];
+    const seen = new Set<string>();
+    for (let offset = 0; ; offset += limit) {
+      const raw = await fetchPage(offset, limit);
+      const page = this.toArrayPayload(raw, ['artists', 'albums', 'list']);
+      const previousCount = items.length;
+      for (const value of page) {
+        const item = mapItem(value);
+        if (!item.id || seen.has(item.id)) continue;
+        seen.add(item.id);
+        items.push({ ...item, favorite: true } as T);
+      }
+      if (page.length === 0 || items.length === previousCount) break;
+      const more = raw?.hasMore ?? raw?.more ??
+        (raw?.count !== undefined ? offset + page.length < Number(raw.count) : undefined) ??
+        (raw?.total !== undefined ? offset + page.length < Number(raw.total) : undefined);
+      if (more === false || (more === undefined && page.length < limit)) break;
+    }
+    return items;
   }
 
   protected cachedUntilNextLocalMidnight<T>(route: string, params: Record<string, any>, producer: () => T): T {
@@ -167,4 +247,8 @@ export abstract class MusicClientBase implements WowAdapter {
   abstract addTrackToPlaylist(playlistId: string, trackId: string): Promise<MutationSuccess>;
   abstract removeTrack(playlistId: string, trackId: string): Promise<MutationSuccess>;
   abstract favoritePlaylist(id: string, status: boolean): Promise<MutationStatus>;
+  abstract favoriteArtist(id: string, status: boolean): Promise<MutationStatus>;
+  abstract favoriteAlbum(id: string, status: boolean): Promise<MutationStatus>;
+  abstract userArtists(): Promise<Artist[]>;
+  abstract userAlbums(): Promise<Album[]>;
 }

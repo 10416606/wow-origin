@@ -14,5 +14,10 @@ module.exports = (query, request) => {
     MUSIC_U: query.MUSIC_U
   }).then(res => {
     return res.body
+  }).catch(error => {
+    if (Number(error?.status) === 501 || Number(error?.body?.code) === 501) {
+      return { data: { code: 501 } }
+    }
+    throw error
   })
 }

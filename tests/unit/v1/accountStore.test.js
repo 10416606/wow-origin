@@ -1,6 +1,7 @@
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
+const { DatabaseSync } = require('node:sqlite')
 
 const {
   createLocalAccountStore,
@@ -91,5 +92,20 @@ describe('SQLite account store', () => {
         lxSource: ['https://example.com/new.js']
       })
     ])
+  })
+
+  test('旧数据库升级后持久化 deviceId 和设备状态', () => {
+    const workDir = makeWorkDir()
+    const database = new DatabaseSync(sqliteAccountsFilePath(workDir))
+    database.exec('CREATE TABLE accounts (id INTEGER PRIMARY KEY, platform TEXT, name TEXT, cookie TEXT, api_access_key TEXT, stateless TEXT, use_luoxue TEXT, lx_source TEXT, updated_at TEXT)')
+    database.exec("INSERT INTO accounts (platform, api_access_key) VALUES ('\"qq\"', 'qq-key')")
+    database.close()
+
+    const store = createLocalAccountStore(workDir)
+    store.update('qq-key', { deviceId: 'android-id', deviceState: 'encoded-device-state' })
+    store.close()
+    const reopened = createLocalAccountStore(workDir)
+    expect(reopened.list()[0]).toMatchObject({ deviceId: 'android-id', deviceState: 'encoded-device-state' })
+    reopened.close()
   })
 })

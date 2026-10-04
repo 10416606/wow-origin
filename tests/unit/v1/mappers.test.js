@@ -94,4 +94,27 @@ describe('v1 mappers', () => {
       expect.objectContaining({ key: 'exhigh', bitrate: 320000 })
     ])
   })
+
+  test('网易歌曲音质详情映射增强音质，并为 sky 采用默认 c51 变体', () => {
+    const qualities = neteaseMappers.mapTrack({
+      id: 123,
+      name: '歌曲',
+      sq: { br: 931239, size: 100 },
+      hr: null,
+      jm: { br: 5383538, size: 200 },
+      je: { br: 3051702, size: 300 },
+      sk: { br: 941890, size: 400, it: 'ste' },
+      sks: [{ br: 2286826, size: 500, it: 'c51' }],
+      vi: { br: 832042, size: 600 }
+    }).qualities
+
+    expect(qualities.map(({ key }) => key)).toEqual(['lossless', 'jyeffect', 'sky', 'master'])
+    expect(qualities.find(({ key }) => key === 'sky')).toMatchObject({ bitrate: 2286826, size: 500 })
+  })
+
+  test('没有 c51 变体时不宣称支持默认 sky', () => {
+    const qualities = neteaseMappers.mapTrack({ sk: { size: 100, it: 'ste' }, sks: [{ size: 100, it: 'ste' }] }).qualities
+    expect(qualities).toEqual([])
+    expect(neteaseMappers.mapTrack({ sk: { size: 100 } }).qualities.map(({ key }) => key)).toEqual(['sky'])
+  })
 })

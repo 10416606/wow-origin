@@ -5,6 +5,7 @@ const {
   LxSourceManager,
   LxSourceRuntime,
   getLxSourceCachePath,
+  getLxQualityCandidates,
   loadLxSourceConfigs,
   md5,
   parseLxScriptInfo,
@@ -107,8 +108,23 @@ describe('LX resource', () => {
     }))
     expect(selectLxQuality('higher', ['128k', '320k'])).toBe('320k')
     expect(selectLxQuality('lossless', ['128k', '320k'])).toBe('320k')
+    expect(selectLxQuality('hires', ['128k', '320k', 'flac'])).toBe('flac')
+    expect(selectLxQuality('hires', ['flac', 'hires'])).toBe('hires')
+    expect(selectLxQuality('jyeffect', ['flac', 'hires'])).toBeUndefined()
+    expect(selectLxQuality('sky', ['flac', 'atmos'])).toBe('atmos')
+    expect(selectLxQuality('sky', ['128k', '320k', 'flac24bit'])).toBe('320k')
+    expect(selectLxQuality('master', ['128k', 'flac', 'flac24bit', 'master'])).toBe('master')
+    expect(selectLxQuality('master', ['128k', 'flac', 'flac24bit'])).toBe('flac24bit')
+    expect(getLxQualityCandidates('master', ['master', 'hires', 'flac24bit', 'flac', '320k', '128k']))
+      .toEqual(['master', 'hires', 'flac24bit', 'flac', '320k', '128k'])
+    expect(getLxQualityCandidates('hires', ['hires', 'flac24bit', 'flac', '320k', '128k']))
+      .toEqual(['hires', 'flac24bit', 'flac', '320k', '128k'])
+    expect(getLxQualityCandidates('sky', ['atmos', 'hires', 'flac24bit', 'flac', '320k', '128k']))
+      .toEqual(['atmos', 'flac', '320k', '128k'])
+    expect(getLxQualityCandidates('jyeffect', ['flac', '320k', '128k'])).toEqual([])
     expect(selectLxQuality('standard', ['320k'])).toBeUndefined()
     expect(selectLxQuality('max', ['128k', 'flac24bit'])).toBe('flac24bit')
+    expect(selectLxQuality('max', ['flac', 'hires', 'atmos', 'master'], 'qq')).toBe('master')
     expect(parseLxScriptInfo(`/*!
       * @name 感叹号文件头
       */`).name).toBe('感叹号文件头')
