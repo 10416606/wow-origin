@@ -3,6 +3,24 @@ const { QQClient } = require('../../dist/clients/QQClient')
 const { NeteaseClient } = require('../../dist/clients/NeteaseClient')
 
 describe('Wow adapter', () => {
+  test('歌曲详情合并洛雪逐曲音质与真实大小，保留原有音质', async () => {
+    const sq = { key: 'lossless', label: 'SQ', size: 100 }
+    jest.spyOn(QQClient.prototype, 'getTrackDetail').mockResolvedValue({ id: 'song', qualities: [sq] })
+    const master = { key: 'master', label: '母带', size: 300, format: 'flac' }
+    const resolver = { getTrackQualities: jest.fn().mockResolvedValue([master]), resolveTrackUrl: jest.fn() }
+    const adapter = createAdapter({ platform: 'qq', cookie: '', useLuoxue: true }, resolver)
+    expect((await adapter.getTrackDetail('song')).qualities).toEqual([sq, master])
+    expect(resolver.getTrackQualities).toHaveBeenCalledWith('qq', 'song')
+  })
+
+  test('逐曲探测失败仍然返回官方歌曲详情', async () => {
+    const track = { id: 'song', qualities: [] }
+    jest.spyOn(QQClient.prototype, 'getTrackDetail').mockResolvedValue(track)
+    const adapter = createAdapter({ platform: 'qq', cookie: '' }, {
+      getTrackQualities: jest.fn().mockRejectedValue(new Error('timeout')), resolveTrackUrl: jest.fn()
+    })
+    expect(await adapter.getTrackDetail('song')).toEqual(track)
+  })
   afterEach(() => {
     jest.restoreAllMocks()
   })
