@@ -81,9 +81,7 @@ export function mapMusicPlatformToLx(platform: MusicPlatform): LxPlatform {
 }
 
 export function getLxQualityCandidates(requestedQuality: string | undefined, supported: readonly LxQuality[], platform: MusicPlatform = 'netease'): LxQuality[] {
-  const available = platform === 'qq'
-    ? supported.filter((quality) => ['128k', '320k', 'flac', 'flac24bit'].includes(quality))
-    : supported;
+  const available = supported;
   if (available.length === 0 || requestedQuality === 'jyeffect') return [];
   const fallback: LxQuality[] = ['flac', '320k', '128k'];
   const candidates: LxQuality[] = [];
@@ -109,6 +107,11 @@ export function getLxQualityCandidates(requestedQuality: string | undefined, sup
     candidates.push('320k');
   }
 
+  if (requestedQuality === 'flac24bit') candidates[0] = 'flac24bit';
+  const highIndex = LX_QUALITIES.indexOf(candidates[0]);
+  if (requestedQuality !== 'sky' && highIndex > LX_QUALITIES.indexOf('flac')) {
+    return LX_QUALITIES.slice(0, highIndex + 1).reverse().filter(quality => quality !== 'atmos' && available.includes(quality));
+  }
   const baseIndex = fallback.indexOf(candidates[0]);
   const lower = baseIndex >= 0 ? fallback.slice(baseIndex + 1) : fallback;
   return [...new Set([...candidates, ...lower])].filter((quality) => available.includes(quality));
@@ -134,5 +137,5 @@ export function mapLxQualityToTrackUrl(url: string, quality: LxQuality) {
   if (quality === '320k') {
     return { url, quality: 'exhigh', format: '', bitrate: 320_000, size: 0 };
   }
-  return { url, quality: 'lossless', format: '', bitrate: null, size: 0 };
+  return { url, quality: quality === 'flac' ? 'lossless' : quality, format: '', bitrate: null, size: 0 };
 }
