@@ -59,6 +59,18 @@ export function createAdapter(
   if (account.platform === 'ytmusic' || account.useLuoxue === false || !lxTrackUrlResolver) return client;
 
   const defaultGetTrackUrl = client.getTrackUrl.bind(client);
+  const defaultGetTrackDetail = client.getTrackDetail.bind(client);
+  if (lxTrackUrlResolver.getTrackQualities) {
+    client.getTrackDetail = async (id: string) => {
+      const [track, qualities] = await Promise.all([
+        defaultGetTrackDetail(id),
+        lxTrackUrlResolver.getTrackQualities!(account.platform, id).catch(() => [])
+      ]);
+      const merged = new Map((track.qualities || []).map((quality) => [quality.key, quality]));
+      for (const quality of qualities) merged.set(quality.key, quality);
+      return { ...track, qualities: [...merged.values()] };
+    };
+  }
   const getLxTrackUrl = async (id: string, quality?: string): Promise<TrackUrl | undefined> => {
     if (account.platform === 'netease' && quality === 'jyeffect') return undefined;
     try {
@@ -78,7 +90,7 @@ export function createAdapter(
   client.getTrackUrl = async (id: string, quality?: string) => {
     const lxTrackUrl = await getLxTrackUrl(id, quality);
     if (lxTrackUrl) return lxTrackUrl;
-    return defaultGetTrackUrl(id, quality);
+    return defaultGetTrackUrl(id, account.platform === 'qq' && ['flac24bit', 'hires', 'master'].includes(quality || '') ? 'max' : quality);
   };
   return client;
 }
@@ -119,7 +131,10 @@ export function createWowContextResolver(
     }
     return {
       adapter,
-      qualityMap: getQualityOptions(account.platform),
+      qualityMap: [...new Map([
+        ...getQualityOptions(account.platform),
+        ...(account.useLuoxue !== false ? lxTrackUrlResolver?.getQualityOptions?.(account.platform) || [] : [])
+      ].map(option => [option.key, option])).values()],
       accountName: account.name,
       stateless: account.stateless
     };
