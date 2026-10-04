@@ -345,7 +345,10 @@ export class CloudflareLxSourceManager implements AppLxSourceManager {
     const selected = selectQuality(requestedQuality, supported);
     if (!selected) return undefined;
     const candidates = QUALITIES.slice(0, QUALITIES.indexOf(selected) + 1).reverse()
-      .filter((quality) => supported.includes(quality));
+      .filter((quality) => supported.includes(quality))
+      .filter((quality) => requestedQuality === 'sky'
+        ? ['atmos', 'flac', '320k', '128k'].includes(quality)
+        : quality !== 'atmos');
     const deadline = Date.now() + 25_000;
     for (const quality of candidates) {
       const remaining = deadline - Date.now();
