@@ -1,5 +1,5 @@
 import type {
-  Album, AlbumDetail, AlbumPage, Artist, ArtistDetail, ArtistPage, Playlist, PlaylistCategory,
+  Album, AlbumDetail, AlbumPage, Artist, ArtistDetail, ArtistPage, Playlist, PlaylistCategory, Quality,
   PlaylistDetail, PlaylistPage, SearchSuggest, ToplistGroup, Track, TrackLyrics, TrackPage,
   TrackUrl, UserProfile, WowAdapter
 } from 'aduoer-wow-sdk';
@@ -27,6 +27,31 @@ function rawTrackCacheExpiry(url: string): number {
   const upstreamExpiry = Number(new URL(url).searchParams.get('expire')) * 1000;
   return Math.min(now + 30 * 60_000,
     Number.isFinite(upstreamExpiry) && upstreamExpiry > 0 ? upstreamExpiry - 5 * 60_000 : now + 5 * 60_000);
+}
+
+function audioFormats(response: any): any[] {
+  return (response?.streamingData?.adaptiveFormats || [])
+    .filter((format: any) => format.url && String(format.mimeType || '').startsWith('audio/mp4'))
+    .sort((left: any, right: any) => Number(left.bitrate || 0) - Number(right.bitrate || 0));
+}
+
+function audioQuality(key: 'standard' | 'higher', format: any): Quality {
+  return {
+    key,
+    label: key === 'standard' ? '标准' : '高品质',
+    bitrate: Number(format?.bitrate) || null,
+    format: 'm4a',
+    size: Number(format?.contentLength) || 0
+  };
+}
+
+function audioQualities(response: any): Quality[] {
+  const formats = audioFormats(response);
+  if (!formats.length) return [];
+  return [
+    audioQuality('standard', formats[0]),
+    audioQuality('higher', formats[formats.length - 1])
+  ];
 }
 
 function page<T>(items: T[], offset: number, limit: number, hasMore: boolean) {
@@ -211,14 +236,15 @@ export class YTMusicClient implements WowAdapter {
     if (!details) throw new NotFoundError('YouTube Music 歌曲不存在');
     const musicTrack = findAll(musicResponse, 'playlistPanelVideoRenderer')
       .find((row) => row.videoId === id);
-    return this.withTrack(mapTrack({
+    const track = mapTrack({
       videoId: id,
       title: details.title,
       author: details.author,
       channelId: details.channelId,
       duration_seconds: Number(details.lengthSeconds),
       thumbnails: musicTrack?.thumbnail?.thumbnails || []
-    }));
+    });
+    return this.withTrack({ ...track, qualities: audioQualities(response) });
   }
 
   async getRawTrackUrl(id: string, quality = 'higher'): Promise<TrackUrl> {
@@ -230,9 +256,7 @@ export class YTMusicClient implements WowAdapter {
 
     const request = (async () => {
       const response = await this.api.player(id);
-      const formats = (response.streamingData?.adaptiveFormats || [])
-        .filter((format: any) => format.url && String(format.mimeType || '').startsWith('audio/mp4'))
-        .sort((left: any, right: any) => Number(left.bitrate || 0) - Number(right.bitrate || 0));
+      const formats = audioFormats(response);
       if (!formats.length) {
         throw new UnplayableError(response.playabilityStatus?.reason || 'YouTube Music 未返回可播放的音频地址');
       }
