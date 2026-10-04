@@ -2,14 +2,26 @@ jest.mock('../../cloudflare/generated/lx-source', () => ({
   bundledLxSource: { enabled: true },
   installBundledLxSource: ({ lx }) => {
     lx.on('request', (request) => global.lxQualityHandler(request))
-    lx.send('inited', { sources: { tx: { actions: ['musicUrl'], qualitys: ['128k', '320k', 'flac', 'flac24bit', 'hires', 'master'] } } })
+    lx.send('inited', { sources: { tx: { actions: ['musicUrl'], qualitys: global.lxCapabilities || ['128k', '320k', 'flac', 'flac24bit', 'hires', 'master'] } } })
   }
 }))
 const { CloudflareLxSourceManager } = require('../../cloudflare/lx-manager')
 
 describe('Cloudflare extended LX quality', () => {
   beforeEach(() => { jest.spyOn(global, 'fetch').mockRejectedValue(new Error('metadata unavailable')) })
-  afterEach(() => { delete global.lxQualityHandler; jest.useRealTimers(); jest.restoreAllMocks() })
+  afterEach(() => { delete global.lxQualityHandler; delete global.lxCapabilities; jest.useRealTimers(); jest.restoreAllMocks() })
+  test('automatic fallback skips spatial audio while an explicit sky request uses it', async () => {
+    global.lxCapabilities = ['128k', '320k', 'flac', 'flac24bit', 'hires', 'atmos', 'master']
+    global.lxQualityHandler = jest.fn().mockImplementation(({ info }) =>
+      info.type === 'master' ? Promise.reject(new Error('unavailable')) : Promise.resolve('https://audio.test/' + info.type))
+    const manager = new CloudflareLxSourceManager()
+    await expect(manager.resolveTrackUrl('qq', 'song', 'max')).resolves.toMatchObject({ quality: 'hires' })
+    expect(global.lxQualityHandler.mock.calls.map(([request]) => request.info.type)).toEqual(['master', 'hires'])
+
+    global.lxQualityHandler.mockClear()
+    await expect(manager.resolveTrackUrl('qq', 'song', 'sky')).resolves.toMatchObject({ quality: 'sky' })
+    expect(global.lxQualityHandler.mock.calls.map(([request]) => request.info.type)).toEqual(['atmos'])
+  })
   test('QQ catalogue supplies matching master size when CDN GET and HEAD are denied', async () => {
     global.lxQualityHandler = jest.fn().mockImplementation(({ info }) => info.type === 'master'
       ? Promise.resolve('https://aqqmusic.tc.qq.com/AI00example.flac?vkey=test') : Promise.reject(new Error('unavailable')))
