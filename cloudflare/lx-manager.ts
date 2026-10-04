@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { isIP } from 'node:net';
 import zlib from 'node:zlib';
 import { Buffer } from 'node:buffer';
 import type { TrackUrl } from 'aduoer-wow-sdk';
@@ -8,7 +9,7 @@ import type { LxPlatform, LxQuality } from '../src/lx-resource/types';
 import { bundledLxSource, installBundledLxSource } from './generated/lx-source';
 
 const EVENT_NAMES = { request: 'request', inited: 'inited', updateAlert: 'updateAlert' } as const;
-const QUALITIES: LxQuality[] = ['128k', '320k', 'flac', 'flac24bit'];
+const QUALITIES: LxQuality[] = ['128k', '320k', 'flac', 'flac24bit', 'hires', 'atmos', 'master'];
 
 type SourceCapability = { actions: string[]; qualities: LxQuality[] };
 type RequestHandler = (input: Record<string, unknown>) => unknown;
@@ -16,7 +17,8 @@ type RequestHandler = (input: Record<string, unknown>) => unknown;
 function selectQuality(requested: string | undefined, supported: readonly LxQuality[]): LxQuality | undefined {
   if (requested === 'max') return [...QUALITIES].reverse().find((item) => supported.includes(item));
   if (requested === 'min') return QUALITIES.find((item) => supported.includes(item));
-  const target: LxQuality = requested === 'standard' ? '128k' : requested === 'lossless' ? 'flac' : '320k';
+  const target: LxQuality = requested === 'sky' ? 'atmos' : QUALITIES.includes(requested as LxQuality) ? requested as LxQuality
+    : requested === 'standard' ? '128k' : requested === 'lossless' ? 'flac' : '320k';
   for (let index = QUALITIES.indexOf(target); index >= 0; index -= 1) {
     if (supported.includes(QUALITIES[index])) return QUALITIES[index];
   }
@@ -27,9 +29,115 @@ function trackUrl(url: string, quality: LxQuality): TrackUrl {
   if (url.length > 2048) throw new Error('洛雪源返回的地址过长');
   const parsed = new URL(url);
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('洛雪源返回了非 HTTP 地址');
+  if (parsed.hostname === 'aqqmusic.tc.qq.com' && parsed.pathname === '/') {
+    throw new Error('洛雪源返回了空的音频目录');
+  }
+  // This CDN serves identical signed files over TLS. Prefer HTTPS for both
+  // Worker metadata requests and iOS playback; do not rewrite arbitrary hosts.
+  if (parsed.protocol === 'http:' && parsed.hostname === 'aqqmusic.tc.qq.com'
+    && /^\/[A-Za-z0-9]+\.(flac|mp3|m4a)$/.test(parsed.pathname)) {
+    parsed.protocol = 'https:';
+    url = parsed.toString();
+  }
   if (quality === '128k') return { url, quality: 'standard', format: '', bitrate: 128_000, size: 0 };
   if (quality === '320k') return { url, quality: 'exhigh', format: '', bitrate: 320_000, size: 0 };
-  return { url, quality: 'lossless', format: '', bitrate: null, size: 0 };
+  return { url, quality: quality === 'flac' ? 'lossless' : quality === 'atmos' ? 'sky' : quality, format: '', bitrate: null, size: 0 };
+}
+
+class UnavailableAudioError extends Error {}
+
+// Read only a small prefix. Some CDNs ignore Range and stream the entire song.
+async function inspectAudio(track: TrackUrl, timeoutMs: number): Promise<TrackUrl> {
+  const original = new URL(track.url);
+  const directIp = isIP(original.hostname.replace(/^\[|\]$/g, '')) !== 0;
+  let probeUrl = track.url;
+  if (directIp) {
+    // Workers cannot fetch literal IPs. This QQ CDN route carries the same
+    // file name/signature as its domain form; use it only for metadata.
+    const qqFile = original.pathname.match(/^\/amobile\.music\.tc\.qq\.com\/([A-Za-z0-9]+\.flac)$/);
+    if (!qqFile) return track;
+    probeUrl = `https://aqqmusic.tc.qq.com/${qqFile[1]}${original.search}`;
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  try {
+    const response = await fetch(probeUrl, {
+      headers: { Range: 'bytes=0-4095', 'Accept-Encoding': 'identity', 'User-Agent': 'Mozilla/5.0' },
+      signal: controller.signal,
+      redirect: 'follow'
+    });
+    if (!response.ok) {
+      void response.body?.cancel().catch(() => {});
+      // Some CDNs treat a byte-range GET differently from a metadata HEAD.
+      // Log only the host and status, never the signed URL or account values.
+      console.info('[audio-metadata]', JSON.stringify({ method: 'GET', host: new URL(probeUrl).hostname,
+        status: response.status, server: response.headers.get('server')?.slice(0, 64) }));
+      if (response.status === 403) {
+        const head = await fetch(probeUrl, {
+          method: 'HEAD', headers: { 'Accept-Encoding': 'identity', 'User-Agent': 'Mozilla/5.0' },
+          signal: controller.signal, redirect: 'follow'
+        });
+        console.info('[audio-metadata]', JSON.stringify({ method: 'HEAD', host: new URL(probeUrl).hostname,
+          status: head.status, server: head.headers.get('server')?.slice(0, 64) }));
+        void head.body?.cancel().catch(() => {});
+        const size = Number(head.headers.get('content-length'));
+        if (head.status === 200 && !head.headers.get('content-encoding')
+          && !/text\/html|application\/json/i.test(head.headers.get('content-type') || '')
+          && Number.isSafeInteger(size) && size > 0) return { ...track, size };
+      }
+      // CDN authorization/geography and transient failures depend on the
+      // request's origin. The iOS client may still play this signed URL.
+      if (response.status === 401 || response.status === 403
+        || response.status === 429 || response.status >= 500) return track;
+      throw new UnavailableAudioError('Audio address unavailable');
+    }
+    const contentType = response.headers.get('content-type') || '';
+    if (/text\/html|application\/json/i.test(contentType)) {
+      void response.body?.cancel().catch(() => {});
+      throw new UnavailableAudioError('Audio address returned an error document');
+    }
+    const range = response.headers.get('content-range')?.match(/^bytes\s+\d+-\d+\/(\d+)$/i);
+    const length = response.status === 200 && !response.headers.get('content-encoding')
+      ? Number(response.headers.get('content-length')) : 0;
+    const size = range ? Number(range[1]) : length;
+    if (Number.isSafeInteger(size) && size > 0) track = { ...track, size };
+    reader = response.body?.getReader();
+    const prefix = new Uint8Array(42);
+    let count = 0;
+    while (reader && count < prefix.length) {
+      const part = await reader.read();
+      if (part.done) break;
+      const take = part.value.subarray(0, prefix.length - count);
+      prefix.set(take, count);
+      count += take.length;
+    }
+    if (count >= 42 && Buffer.from(prefix.subarray(0, 4)).toString() === 'fLaC'
+      && (prefix[4] & 0x7f) === 0 && prefix[7] === 34) {
+      const packed = Buffer.from(prefix).readBigUInt64BE(18);
+      const sampleRate = Number(packed >> 44n);
+      const samples = Number(packed & ((1n << 36n) - 1n));
+      const bitrate = sampleRate > 0 && samples > 0 && track.size > 0
+        ? Math.round(track.size * 8 * sampleRate / samples) : null;
+      return { ...track, format: 'flac', bitrate };
+    }
+    if (count >= 3 && (Buffer.from(prefix.subarray(0, 3)).toString() === 'ID3'
+      || (prefix[0] === 0xff && (prefix[1] & 0xe0) === 0xe0))) {
+      return { ...track, format: 'mp3' };
+    }
+    if (/audio\/mp4|audio\/x-m4a/i.test(contentType)) return { ...track, format: 'm4a' };
+    return track;
+  } catch (error) {
+    // A rejected alternative metadata route says nothing about the original
+    // IP link's playability on the phone. Preserve that link and its tier.
+    if (error instanceof UnavailableAudioError && !directIp) throw error;
+    // Missing metadata or a slow probe must not break an otherwise usable URL.
+    return track;
+  } finally {
+    if (reader) void reader.cancel().catch(() => {});
+    controller.abort();
+    clearTimeout(timer);
+  }
 }
 
 function parseBody(raw: Buffer): unknown {
@@ -48,7 +156,7 @@ function request(
   const headers = new Headers(options.headers || {});
   let body = options.body;
   if (body === undefined && options.form) {
-    body = new URLSearchParams(Object.entries(options.form).map(([key, value]) => [key, String(value)]));
+    body = new URLSearchParams(Object.entries(options.form).map(([key, value]): [string, string] => [key, String(value)]));
     if (!headers.has('content-type')) headers.set('content-type', 'application/x-www-form-urlencoded');
   } else if (body === undefined && options.formData) {
     const formData = new FormData();
@@ -93,6 +201,58 @@ function zlibCall(method: 'inflate' | 'deflate', input: Uint8Array): Promise<Buf
 export class CloudflareLxSourceManager implements AppLxSourceManager {
   private requestHandler?: RequestHandler;
   private readonly capabilities: Partial<Record<LxPlatform, SourceCapability>> = {};
+  private readonly qqMetadata = new Map<string, { expires: number; value: Promise<Record<string, any> | undefined> }>();
+
+  // The QQ catalogue provides sizes even when Workers cannot read the audio
+  // CDN. Cache public metadata only; never store signed playback URLs here.
+  private getQQMetadata(id: string): Promise<Record<string, any> | undefined> {
+    const cached = this.qqMetadata.get(id);
+    if (cached && cached.expires > Date.now()) return cached.value;
+    const value = (async () => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 4000);
+      try {
+        const response = await fetch('https://u.y.qq.com/cgi-bin/musicu.fcg', {
+          method: 'POST', signal: controller.signal,
+          headers: { 'Content-Type': 'application/json', Referer: 'https://y.qq.com/' },
+          body: JSON.stringify({ comm: { ct: 24, cv: 0 }, req: {
+            module: 'music.pf_song_detail_svr', method: 'get_song_detail_yqq',
+            param: { song_mid: id, song_type: 0, song_id: 0 }
+          } })
+        });
+        if (!response.ok) { void response.body?.cancel(); return undefined; }
+        const data = await response.json() as any;
+        const track = data?.req?.data?.track_info;
+        return track?.mid === id ? track.file : undefined;
+      } catch { return undefined; }
+      finally { clearTimeout(timer); }
+    })();
+    if (this.qqMetadata.size >= 256) this.qqMetadata.delete(this.qqMetadata.keys().next().value!);
+    this.qqMetadata.set(id, { expires: Date.now() + 300_000, value });
+    return value;
+  }
+
+  private async inspectTrack(platform: MusicPlatform, id: string, track: TrackUrl, timeout: number): Promise<TrackUrl> {
+    const url = new URL(track.url);
+    const knownQQ = url.hostname === 'aqqmusic.tc.qq.com'
+      || (isIP(url.hostname) !== 0 && url.pathname.startsWith('/amobile.music.tc.qq.com/'));
+    // Associate sizes only with the matching QQ file encoding. In particular,
+    // SQ size must never be shown for an AI00 master file or a third-party file.
+    const file = url.pathname.split('/').pop() || '';
+    const sizeField = track.quality === 'master' && /^AI00[A-Za-z0-9]+\.flac$/.test(file) ? 'master'
+      : track.quality === 'lossless' && /^F000[A-Za-z0-9]+\.flac$/.test(file) ? 'size_flac'
+      : ['hires', 'flac24bit'].includes(track.quality) && /^RS01[A-Za-z0-9]+\.flac$/.test(file) ? 'size_hires'
+      : track.quality === 'exhigh' && /^M800[A-Za-z0-9]+\.mp3$/.test(file) ? 'size_320mp3'
+      : track.quality === 'standard' && /^M500[A-Za-z0-9]+\.mp3$/.test(file) ? 'size_128mp3' : undefined;
+    const [audio, metadata] = await Promise.all([
+      inspectAudio(track, timeout),
+      platform === 'qq' && knownQQ && sizeField ? this.getQQMetadata(id) : undefined
+    ]);
+    if (audio.size > 0 || !metadata || !sizeField) return audio;
+    const size = Number(sizeField === 'master' ? metadata.size_new?.[0] : metadata[sizeField]);
+    if (!Number.isSafeInteger(size) || size <= 0) return audio;
+    return { ...audio, size, format: file.endsWith('.flac') ? 'flac' : 'mp3' };
+  }
 
   constructor() {
     if (!bundledLxSource.enabled) return;
@@ -149,15 +309,60 @@ export class CloudflareLxSourceManager implements AppLxSourceManager {
   }
 
   start(): void {}
+  // Only advertise a per-track tier after resolving that exact tier. A fallback
+  // must not be presented as an available master/Hi-Res file.
+  async getTrackQualities(platform: MusicPlatform, id: string): Promise<import('aduoer-wow-sdk').Quality[]> {
+    const options = this.getQualityOptions(platform).filter(({ key }) => key !== 'max');
+    const results = await Promise.all(options.map(async ({ key, label }) => {
+      try {
+        const result = await this.resolveQuality(platform, id, (key === 'sky' ? 'atmos' : key) as LxQuality, 8000);
+        if (!result) return [];
+        const audio = await this.inspectTrack(platform, id, result, 6000);
+        return [{ key, label, size: audio.size, format: audio.format, bitrate: audio.bitrate }];
+      } catch {
+        return [];
+      }
+    }));
+    return results.flat();
+  }
+  getQualityOptions(platform: MusicPlatform) {
+    const supported = this.capabilities[platform === 'qq' ? 'tx' : 'wy']?.qualities || [];
+    if (platform === 'ytmusic') return [];
+    const labels = { flac24bit: '24 位无损', hires: 'Hi-Res 高解析', atmos: '沉浸环绕声', master: '母带' };
+    return [
+      ...(Object.keys(labels) as (keyof typeof labels)[])
+        .filter((key) => supported.includes(key)).map((key) => ({ key: key === 'atmos' ? 'sky' : key, label: labels[key] })),
+      ...(supported.length ? [{ key: 'max', label: '自动最高音质（失败逐级降级）' }] : [])
+    ];
+  }
   reconcileAccountSources(): void {}
   async updateAll(): Promise<void> {}
   async stop(): Promise<void> {}
 
   async resolveTrackUrl(platform: MusicPlatform, id: string, requestedQuality?: string): Promise<TrackUrl | undefined> {
+    if (platform === 'ytmusic' || requestedQuality === 'jyeffect') return undefined;
+    const supported = this.capabilities[platform === 'qq' ? 'tx' : 'wy']?.qualities || [];
+    const selected = selectQuality(requestedQuality, supported);
+    if (!selected) return undefined;
+    const candidates = QUALITIES.slice(0, QUALITIES.indexOf(selected) + 1).reverse()
+      .filter((quality) => supported.includes(quality));
+    const deadline = Date.now() + 25_000;
+    for (const quality of candidates) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      try {
+        const result = await this.resolveQuality(platform, id, quality, Math.min(8000, remaining));
+        if (result) return await this.inspectTrack(platform, id, result, Math.min(6000, Math.max(1, deadline - Date.now())));
+      } catch {
+        // Try a lower supported quality; never log private source URLs.
+      }
+    }
+    return undefined;
+  }
+
+  private async resolveQuality(platform: MusicPlatform, id: string, quality: LxQuality, timeoutMs: number): Promise<TrackUrl | undefined> {
     if (!this.requestHandler) return undefined;
     const source: LxPlatform = platform === 'qq' ? 'tx' : 'wy';
-    const quality = selectQuality(requestedQuality, this.capabilities[source]?.qualities || []);
-    if (!quality) return undefined;
     const invocation = Promise.resolve(this.requestHandler({
       source,
       action: 'musicUrl',
@@ -178,7 +383,7 @@ export class CloudflareLxSourceManager implements AppLxSourceManager {
       result = await Promise.race([
         invocation,
         new Promise<never>((_resolve, reject) => {
-          timeout = setTimeout(() => reject(new Error('洛雪源请求超时')), 15_000);
+          timeout = setTimeout(() => reject(new Error('洛雪源请求超时')), timeoutMs);
         })
       ]);
     } finally {
