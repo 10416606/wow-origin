@@ -4,6 +4,9 @@ import {
   updateAccountCookieByAccessKey
 } from './accounts';
 import type { MusicPlatform } from './types';
+import { BadRequestError, UpstreamError } from './errors';
+import { refreshYTMusicCookie } from './ytmusic/login';
+import { clearYTMusicTrackCache } from './clients/YTMusicClient';
 
 const Logger = require('../core/Logger');
 
@@ -101,6 +104,68 @@ export function millisecondsUntilNextLoginRefresh(now: Date = new Date()): numbe
   return Math.max(1, nextRefresh.getTime() - now.getTime());
 }
 
+/** 主动刷新单个账号，绕过自动授权检查的时间间隔；失败时保留原凭证。 */
+export async function refreshLoginSession(
+  session: AccountSessionRegistry['sessions'][number],
+  { registry, platformFactory, workDir = process.cwd(), accountStore }: LoginRefreshOptions
+): Promise<{ refreshed: boolean }> {
+  const originalCookie = session.cookie;
+  if (!originalCookie.trim()) throw new BadRequestError('账号没有授权凭证，请先重新登录');
+  let refreshedCookie: string;
+  let androidIdentity: string | undefined;
+  let refreshed: boolean;
+
+  if (session.platform === 'ytmusic') {
+    refreshedCookie = await refreshYTMusicCookie(originalCookie);
+    refreshed = refreshedCookie !== originalCookie;
+  } else {
+    const resourcePlatform = toResourcePlatform(session.platform);
+    const displayName = platformDisplayName(session.platform);
+    const currentCookie = parseCookie(originalCookie);
+    let result: any;
+    try {
+      result = await platformFactory.getPlatform(resourcePlatform).callModule(LOGIN_REFRESH_ROUTE, {
+        query: {
+          ...currentCookie,
+          ...(session.deviceState ? { qq_android_identity: session.deviceState } : {}),
+          platform: resourcePlatform,
+          timestamp: Date.now()
+        },
+        body: {},
+        ip: 'internal-login-refresh',
+        connection: { remoteAddress: 'internal-login-refresh' }
+      });
+    } catch (error) {
+      throw new UpstreamError(`${displayName}授权刷新失败: ${(error as Error).message}`);
+    }
+    const upstreamCode = Number(result?.body?.code ?? 200);
+    if (!result || result.code !== 200 || upstreamCode !== 200) {
+      throw new UpstreamError(result?.message || result?.body?.message || result?.body?.msg || `${displayName}登录状态已过期，请重新登录`);
+    }
+    refreshed = result.refreshed !== false;
+    const refreshedValues = normalizeRefreshedCookie(result.cookie);
+    if (refreshed && Object.keys(refreshedValues).length === 0) {
+      throw new UpstreamError(`${displayName}刷新成功但未返回新的 cookie`);
+    }
+    refreshedCookie = serializeCookie({ ...currentCookie, ...refreshedValues });
+    androidIdentity = typeof result.androidIdentity === 'string' ? result.androidIdentity : undefined;
+  }
+
+  if (registry.byAccessKey.get(session.apiAccessKey) !== session) throw new BadRequestError('账号已删除');
+  if (session.cookie !== originalCookie) throw new BadRequestError('账号授权已变更，请重新刷新');
+  if (!refreshed) return { refreshed: false };
+
+  updateAccountCookieByAccessKey(
+    session.apiAccessKey, session.platform, refreshedCookie, registry, accountStore ?? workDir, androidIdentity
+  );
+  if (session.platform === 'qq') {
+    qqNextLoginCheckAt.delete(session.apiAccessKey);
+    qqCheckedCookies.delete(session.apiAccessKey);
+  }
+  if (session.platform === 'ytmusic') clearYTMusicTrackCache(originalCookie);
+  return { refreshed: true };
+}
+
 /**
  * 顺序刷新指定平台已配置 cookie 的音乐账号，并将成功返回的新 cookie 同步到磁盘与内存。
  * 上游失败、登录过期或没有返回非空 cookie 时只记录错误，保留原登录信息。
@@ -127,54 +192,15 @@ export async function refreshLoginSessions({
   }
 
   for (const session of sessions) {
-    const resourcePlatform = toResourcePlatform(session.platform);
     const displayName = platformDisplayName(session.platform);
 
     try {
-      const currentCookie = parseCookie(session.cookie);
-      const platform = platformFactory.getPlatform(resourcePlatform);
-      const result = await platform.callModule(LOGIN_REFRESH_ROUTE, {
-        query: {
-          ...currentCookie,
-          ...(session.deviceState ? { qq_android_identity: session.deviceState } : {}),
-          platform: resourcePlatform,
-          timestamp: Date.now()
-        },
-        body: {},
-        ip: 'internal-scheduler',
-        connection: { remoteAddress: 'internal-scheduler' }
-      });
-      const upstreamCode = Number(result?.body?.code ?? 200);
-      const refreshedValues = normalizeRefreshedCookie(result?.cookie);
-
-      if (!result || result.code !== 200 || upstreamCode !== 200) {
-        throw new Error(result?.message || result?.body?.message || result?.body?.msg || `${displayName}登录状态已过期`);
-      }
-      if (result.refreshed === false) {
+      const { refreshed } = await refreshLoginSession(session, { registry, platformFactory, workDir, accountStore });
+      if (!refreshed) {
         summary.unchanged += 1;
         logger.info(`${displayName}账号 "${session.name}" 登录凭证仍有效，本次无需更新`);
         continue;
       }
-      if (Object.keys(refreshedValues).length === 0) {
-        throw new Error(`${displayName}刷新成功但未返回新的 cookie`);
-      }
-
-      const refreshedCookie = serializeCookie({
-        ...currentCookie,
-        ...refreshedValues
-      });
-      if (!refreshedCookie) {
-        throw new Error(`${displayName}刷新后的 cookie 无效`);
-      }
-
-      updateAccountCookieByAccessKey(
-        session.apiAccessKey,
-        session.platform,
-        refreshedCookie,
-        registry,
-        accountStore ?? workDir,
-        typeof result.androidIdentity === 'string' ? result.androidIdentity : undefined
-      );
 
       summary.refreshed += 1;
       logger.info(`${displayName}账号 "${session.name}" 登录状态刷新成功`);

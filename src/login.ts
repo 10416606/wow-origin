@@ -14,6 +14,7 @@ import { BadRequestError, UpstreamError } from './errors';
 import { qrCodeDataUrl } from './qr';
 import { preloadSessionFavorites } from './onload';
 import { YTMusicClient } from './clients/YTMusicClient';
+import { refreshLoginSession } from './loginRefresh';
 
 const { deviceIdFromIdentity } = require('../platforms/qqmusic/util/android-login');
 
@@ -323,6 +324,14 @@ export function createLoginRouter({
     } catch (error) {
       next(error);
     }
+  });
+
+  router.post('/api/refresh', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const session = requireAccount(registry, req.body?.api_access_key);
+      const { refreshed } = await refreshLoginSession(session, { registry, platformFactory, accountStore, workDir });
+      res.json({ code: 200, data: { refreshed, message: refreshed ? '授权已刷新' : '授权仍有效，无需更新' } });
+    } catch (error) { next(error); }
   });
 
   router.put('/api/account/config', (req: Request, res: Response, next: NextFunction) => {

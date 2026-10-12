@@ -377,6 +377,23 @@
     remove.addEventListener('click', () => { row.remove(); if (!list.children.length) addSourceInput(); });
     row.append(input, remove); list.append(row);
   }
+  async function refreshAuthorization() {
+    const button = $('refresh-auth');
+    if (button.disabled || !state.account) return;
+    const sequence = state.loginSequence;
+    const apiAccessKey = state.account.apiAccessKey;
+    setBusy(button, true, '正在刷新…');
+    $('config-message').textContent = ''; $('config-message').className = 'message';
+    try {
+      const data = await jsonRequest('/login/api/refresh', 'POST', { api_access_key: apiAccessKey });
+      if (sequence !== state.loginSequence || state.account?.apiAccessKey !== apiAccessKey) return;
+      $('config-message').textContent = data.message; $('config-message').className = 'message success';
+    } catch (error) {
+      if (sequence === state.loginSequence && state.account?.apiAccessKey === apiAccessKey) {
+        $('config-message').textContent = error.message; $('config-message').className = 'message error';
+      }
+    } finally { setBusy(button, false); }
+  }
   async function saveConfig() {
     const sequence = state.loginSequence;
     const button = $('save-config'); setBusy(button, true, '正在保存…'); $('config-message').className = 'message';
@@ -483,6 +500,7 @@
   $('scan-back').addEventListener('click', () => state.account ? showAccount(state.account) : backToChoose());
   $('regenerate-qr').addEventListener('click', startScan);
   $('relogin').addEventListener('click', () => selectLoginMethod(state.account?.platform === 'ytmusic' ? 'cookie' : 'qr'));
+  $('refresh-auth').addEventListener('click', refreshAuthorization);
   $('add-lx-source').addEventListener('click', () => addSourceInput()); $('save-config').addEventListener('click', saveConfig);
   $('retry-backend').addEventListener('click', async () => { try { await window.__TAURI__.core.invoke('restart_backend'); initializeBackend(); } catch (error) { $('splash-message').textContent = error.message; } });
   initializeBackend();
