@@ -147,7 +147,7 @@ export function mapAlbumDetail(raw: any = {}): AlbumDetail {
   const albumSource = raw.album || raw.data?.album || raw;
   let coverUrl = albumSource.coverUrl || albumSource.picUrl || albumSource.coverImgUrl;
   if (!coverUrl && albumSource.mid) {
-    coverUrl = `https://y.gtimg.cn/music/photo_new/T002R300x300M000${albumSource.mid}.jpg`;
+    coverUrl = `https://y.gtimg.cn/music/photo_new/T002R800x800M000${albumSource.mid}.jpg`;
   }
   let artistCoverUrl = albumSource.artist?.coverUrl || albumSource.artist?.picUrl || albumSource.artist?.avatar;
   if (!artistCoverUrl && albumSource.singermid) {
