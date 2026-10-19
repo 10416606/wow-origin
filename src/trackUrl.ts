@@ -18,7 +18,8 @@ export async function resolveTrackUrlWithFallback(
   platform: MusicPlatform,
   quality: string | undefined,
   getTrackDetail: () => Promise<Track>,
-  getTrackUrl: (quality: string) => Promise<TrackUrl>
+  getTrackUrl: (quality: string) => Promise<TrackUrl>,
+  includeLx = false
 ): Promise<TrackUrl> {
   const requestedQuality = getRequestedQuality(platform, quality);
   const resolve = async (candidate: string): Promise<TrackUrl> => {
@@ -39,7 +40,7 @@ export async function resolveTrackUrlWithFallback(
   } catch {
     throw originalError;
   }
-  for (const candidate of getQualityCandidates(platform, requestedQuality, track.qualities || [])) {
+  for (const candidate of getQualityCandidates(platform, requestedQuality, track.qualities || [], includeLx)) {
     try {
       return await resolve(candidate);
     } catch {

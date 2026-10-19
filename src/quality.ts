@@ -66,12 +66,17 @@ export function getRequestedQuality(platform: MusicPlatform, quality?: string): 
 }
 
 /** 只选择歌曲实际存在且低于失败档位的音质，按距离从近到远排序。 */
-export function getQualityCandidates(platform: MusicPlatform, quality: string, available: readonly Pick<Quality, 'key'>[]): string[] {
+export function getQualityCandidates(platform: MusicPlatform, quality: string, available: readonly Pick<Quality, 'key'>[], includeLx = false): string[] {
   const qualities = getPlatformQualities(platform);
+  if (includeLx) {
+    if (!qualities.some((item) => item.key === 'hires')) qualities.push({ key: 'hires', label: 'Hi-Res', rank: 55 });
+    qualities.push({ key: 'flac24bit', label: '24bit 无损', rank: 45 });
+    qualities.sort((lhs, rhs) => lhs.rank - rhs.rank);
+  }
   const index = qualities.findIndex((item) => item.key === quality);
   if (index === -1) return [];
   const supported = new Set(available.map((item) => item.key));
-  return qualities.slice(0, index).reverse().filter((item) => supported.has(item.key)).map((item) => item.key);
+  return qualities.slice(0, index).reverse().filter((item) => supported.has(item.key) && (!includeLx || !['sky', 'atmos51', 'dolby'].includes(item.key))).map((item) => item.key);
 }
 
 function getQualitySource(platform: MusicPlatform, definition: PlatformQuality, track: any): any {

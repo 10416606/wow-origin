@@ -8,7 +8,7 @@ import { collectionStatusNeeded } from './collectionStatus';
 import type { MusicPlatform } from './types';
 import type { LxTrackUrlResolver } from './lx-resource';
 import { createStreamUrl } from './ytmusic/stream';
-import { hasValidAudioUrl } from './trackUrl';
+import { hasValidAudioUrl, resolveTrackUrlWithFallback } from './trackUrl';
 
 /** 根据私有平台账号创建符合公开 SDK 契约的 Adapter。 */
 export function createMusicClient(
@@ -63,6 +63,18 @@ export function createAdapter(
   };
   if (client instanceof YTMusicClient || account.useLuoxue === false || !lxTrackUrlResolver) return client;
 
+  const defaultGetTrackDetail = client.getTrackDetail.bind(client);
+  if (lxTrackUrlResolver.getTrackQualities) {
+    client.getTrackDetail = async (id: string) => {
+      const [track, qualities] = await Promise.all([
+        defaultGetTrackDetail(id),
+        lxTrackUrlResolver.getTrackQualities!(account.platform, id).catch(() => [])
+      ]);
+      const merged = new Map((track.qualities || []).map((quality) => [quality.key, quality]));
+      for (const quality of qualities) merged.set(quality.key, quality);
+      return { ...track, qualities: [...merged.values()] };
+    };
+  }
   const defaultGetTrackUrl = client.getTrackUrlForQuality.bind(client);
   const getLxTrackUrl = async (id: string, quality?: string): Promise<TrackUrl | undefined> => {
     if (account.platform === 'netease' && quality === 'jyeffect') return undefined;
@@ -85,6 +97,9 @@ export function createAdapter(
     if (lxTrackUrl) return lxTrackUrl;
     return defaultGetTrackUrl(id, quality);
   };
+  client.getTrackUrl = (id: string, quality?: string) => resolveTrackUrlWithFallback(
+    account.platform, quality, () => client.getTrackDetail(id), (candidate) => client.getTrackUrlForQuality(id, candidate), true
+  );
   return client;
 }
 
@@ -124,7 +139,10 @@ export function createWowContextResolver(
     }
     return {
       adapter,
-      qualityMap: getQualityOptions(account.platform),
+      qualityMap: [...new Map([
+        ...getQualityOptions(account.platform),
+        ...(account.useLuoxue !== false ? lxTrackUrlResolver?.getQualityOptions?.(account.platform) || [] : [])
+      ].map(option => [option.key, option])).values()],
       accountName: account.name,
       stateless: account.stateless
     };
