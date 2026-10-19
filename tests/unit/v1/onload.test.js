@@ -2,7 +2,9 @@ jest.mock('../../../src/clients/QQClient', () => ({
   QQClient: jest.fn().mockImplementation(() => ({
     userFavoriteTracks: jest.fn().mockResolvedValue([{ id: '1' }]),
     userArtists: jest.fn().mockResolvedValue([{ id: 'artist-1' }]),
-    userAlbums: jest.fn().mockResolvedValue([{ id: 'album-1' }])
+    userAlbums: jest.fn().mockResolvedValue([{ id: 'album-1' }]),
+    getUserPlaylist: jest.fn().mockResolvedValue([]),
+    createPlaylist: jest.fn(), deletePlaylist: jest.fn()
   }))
 }));
 
@@ -10,7 +12,9 @@ jest.mock('../../../src/clients/NeteaseClient', () => ({
   NeteaseClient: jest.fn().mockImplementation(() => ({
     userFavoriteTracks: jest.fn().mockResolvedValue([{ id: '1' }]),
     userArtists: jest.fn().mockResolvedValue([{ id: 'artist-1' }]),
-    userAlbums: jest.fn().mockResolvedValue([{ id: 'album-1' }])
+    userAlbums: jest.fn().mockResolvedValue([{ id: 'album-1' }]),
+    getUserPlaylist: jest.fn().mockResolvedValue([]),
+    createPlaylist: jest.fn(), deletePlaylist: jest.fn()
   }))
 }));
 
@@ -26,12 +30,16 @@ describe('onload', () => {
     QQClient.mockImplementation(() => ({
       userFavoriteTracks: jest.fn().mockResolvedValue([{ id: '1' }]),
       userArtists: jest.fn().mockResolvedValue([{ id: 'artist-1' }]),
-      userAlbums: jest.fn().mockResolvedValue([{ id: 'album-1' }])
+      userAlbums: jest.fn().mockResolvedValue([{ id: 'album-1' }]),
+      getUserPlaylist: jest.fn().mockResolvedValue([]),
+      createPlaylist: jest.fn(), deletePlaylist: jest.fn()
     }));
     NeteaseClient.mockImplementation(() => ({
       userFavoriteTracks: jest.fn().mockResolvedValue([{ id: '1' }]),
       userArtists: jest.fn().mockResolvedValue([{ id: 'artist-1' }]),
-      userAlbums: jest.fn().mockResolvedValue([{ id: 'album-1' }])
+      userAlbums: jest.fn().mockResolvedValue([{ id: 'album-1' }]),
+      getUserPlaylist: jest.fn().mockResolvedValue([]),
+      createPlaylist: jest.fn(), deletePlaylist: jest.fn()
     }));
   });
 
@@ -70,9 +78,10 @@ describe('onload', () => {
       byAccessKey: new Map()
     });
 
-    expect(QQClient).toHaveBeenCalledWith('uin=o123; qm_keyst=abc', favoriteTrackIds, favoriteArtistIds, favoriteAlbumIds, userPlaylistIds);
-    expect(QQClient.mock.results[0].value.userArtists).toHaveBeenCalledTimes(1)
-    expect(QQClient.mock.results[0].value.userAlbums).toHaveBeenCalledTimes(1)
+    expect(QQClient).toHaveBeenCalledWith('uin=o123; qm_keyst=abc', favoriteTrackIds, favoriteArtistIds, favoriteAlbumIds, userPlaylistIds, undefined);
+    expect(session.favoriteArtistsLoaded).toBe(true)
+    expect(session.favoriteAlbumsLoaded).toBe(true)
+    expect(QQClient.mock.results[0].value.getUserPlaylist).toHaveBeenCalledTimes(1)
   });
 
   test('网易账号 cookie 存在时执行收藏预加载', async () => {
@@ -87,7 +96,8 @@ describe('onload', () => {
     });
 
     expect(NeteaseClient).toHaveBeenCalledWith('MUSIC_U=abc', favoriteTrackIds, favoriteArtistIds, favoriteAlbumIds, userPlaylistIds);
-    expect(NeteaseClient.mock.results[0].value.userArtists).toHaveBeenCalledTimes(1)
-    expect(NeteaseClient.mock.results[0].value.userAlbums).toHaveBeenCalledTimes(1)
+    expect(session.favoriteArtistsLoaded).toBe(true)
+    expect(session.favoriteAlbumsLoaded).toBe(true)
+    expect(NeteaseClient.mock.results[0].value.getUserPlaylist).toHaveBeenCalledTimes(1)
   });
 });

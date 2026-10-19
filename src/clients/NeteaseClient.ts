@@ -31,7 +31,7 @@ export class NeteaseClient extends MusicClientBase {
     }
 
     const raw = await this.call('top_playlist', { offset, limit, total: true, cat: label });
-    const items = (raw.playlists || raw.playlist || raw.toplists || []).map((item: any) => mapPlaylist(item));
+    const items = (raw.playlists || raw.playlist || raw.toplists || []).map((item: any) => this.playlistFavorites.apply(mapPlaylist(item)));
     return { items, offset, limit, hasMore: items.length === limit };
   }
 
@@ -68,7 +68,7 @@ export class NeteaseClient extends MusicClientBase {
       throw new NotFoundError('Toplist not found');
     }
     const tracks = (playlist.tracks || []).slice(0, limit).map((item: any) => this.withFavoriteTrack(mapTrack(item)));
-    return { ...mapPlaylist(playlist), tracks };
+    return this.playlistFavorites.apply({ ...mapPlaylist(playlist), tracks });
   }
 
   async getNewTracks(): Promise<Track[]> {
@@ -85,7 +85,7 @@ export class NeteaseClient extends MusicClientBase {
 
   async getRecommendedPlaylist(offset: number, limit: number): Promise<PlaylistPage> {
     const raw = await this.call('personalized', { offset, limit });
-    const items = (raw.result || raw.playlists || []).map((item: any) => mapPlaylist(item));
+    const items = (raw.result || raw.playlists || []).map((item: any) => this.playlistFavorites.apply(mapPlaylist(item)));
     return { items, offset, limit, hasMore: items.length === limit };
   }
 
@@ -96,7 +96,8 @@ export class NeteaseClient extends MusicClientBase {
       throw new NotFoundError('Playlist not found');
     }
     const tracks = trackLimit !== 0 ? (playlist.tracks || []).slice(0, trackLimit === -1 ? 1000 : trackLimit).map((item: any) => this.withFavoriteTrack(mapTrack(item))) : [];
-    return { ...mapPlaylist(playlist), tracks };
+    return this.playlistFavorites.apply({ ...mapPlaylist(playlist), tracks },
+      typeof playlist.subscribed === 'boolean' ? playlist.subscribed : undefined);
   }
 
   async getDailyTracks(): Promise<Track[]> {
@@ -200,7 +201,7 @@ export class NeteaseClient extends MusicClientBase {
   async searchPlaylists(keyword: string, offset: number, limit: number): Promise<PlaylistPage> {
     const raw = await this.call('cloudsearch', { keywords: keyword, type: 1000, offset, limit });
     const result = raw.result || raw;
-    const items = Array.isArray(result.playlists) ? result.playlists.map((item: any) => mapPlaylist(item)) : [];
+    const items = Array.isArray(result.playlists) ? result.playlists.map((item: any) => this.playlistFavorites.apply(mapPlaylist(item))) : [];
     const total = result.playlistCount || items.length;
     return { items, offset, limit, hasMore: offset + items.length < total };
   }
@@ -352,10 +353,11 @@ export class NeteaseClient extends MusicClientBase {
 
   async favoritePlaylist(id: string, status: boolean): Promise<{ success: boolean; status: boolean }> {
     const raw = await this.call('playlist_subscribe', { id, t: status ? 1 : 0 });
-    if (Number(raw.code) === 501) {
+    if (raw.code !== undefined && Number(raw.code) !== 200) {
       return { success: false, status };
     }
     this.setUserPlaylist(id, status);
+    this.playlistFavorites.set(id, status);
     return { success: true, status };
   }
 

@@ -1,3 +1,4 @@
+import { PlaylistFavorites } from './playlistFavorites';
 import path from 'path';
 import { randomUUID } from 'crypto';
 import type { MusicPlatform } from './types';
@@ -27,6 +28,7 @@ export interface MusicAccountSession {
   deviceState?: string;
   favoriteTrackIds: Set<string>;
   userPlaylistIds: Set<string>;
+  playlistFavorites: PlaylistFavorites;
   favoriteArtistIds: Set<string>;
   favoriteAlbumIds: Set<string>;
   favoriteArtistsLoaded: boolean;
@@ -282,6 +284,7 @@ export function loadAccountSessions(storeInput: AccountStoreInput = process.cwd(
         ...(account.deviceState ? { deviceState: String(account.deviceState) } : {}),
         favoriteTrackIds: new Set<string>(),
         userPlaylistIds: new Set<string>(),
+        playlistFavorites: new PlaylistFavorites(),
         favoriteArtistIds: new Set<string>(),
         favoriteAlbumIds: new Set<string>(),
         favoriteArtistsLoaded: false,
@@ -442,6 +445,7 @@ export function createAccountWithCookie(
     ...(account.deviceState ? { deviceState: String(account.deviceState) } : {}),
     favoriteTrackIds: new Set<string>(),
     userPlaylistIds: new Set<string>(),
+    playlistFavorites: new PlaylistFavorites(),
     favoriteArtistIds: new Set<string>(),
     favoriteAlbumIds: new Set<string>(),
     favoriteArtistsLoaded: false,
@@ -512,5 +516,6 @@ export function deleteAccount(apiAccessKey: string, registry: AccountSessionRegi
     set.add = () => set;
   }
   session.cookie = ''; session.deviceId = undefined; session.deviceState = undefined;
+  session.playlistFavorites.clear();
   session.lxSource = []; session.favoriteArtistsLoaded = false; session.favoriteAlbumsLoaded = false;
 }

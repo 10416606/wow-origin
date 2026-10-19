@@ -1,3 +1,4 @@
+import { PlaylistFavorites } from '../playlistFavorites';
 import type {
   Album,
   AlbumDetail,
@@ -26,6 +27,7 @@ const defaultPlatformFactory = require('../../platforms/PlatformFactory');
 const { globalCache } = require('../../core/PlatformCache');
 
 export abstract class MusicClientBase implements WowAdapter {
+  public playlistFavorites = new PlaylistFavorites();
   protected readonly cookie: string;
   protected readonly platform: MusicPlatform;
   protected readonly favoriteTrackSet: Set<string>;
@@ -104,6 +106,7 @@ export abstract class MusicClientBase implements WowAdapter {
   }
 
   protected replaceUserPlaylists(playlists: Playlist[]): void {
+    this.playlistFavorites.replace(playlists);
     this.userPlaylistSet.clear();
     playlists.forEach((playlist) => this.userPlaylistSet.add(playlist.id));
   }

@@ -24,7 +24,7 @@ class CloudStorage {
         nickname: '',
         avatarUrl: ''
       },
-      subscribed: true,
+      subscribed: false,
       createTime: 0,
       updateTime: 0
     }

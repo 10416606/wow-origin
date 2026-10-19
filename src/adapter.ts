@@ -33,6 +33,19 @@ export function createAdapter(
   streamOrigin?: string
 ): QQClient | NeteaseClient | YTMusicClient {
   const client = createMusicClient(account.platform, account.cookie, account.favoriteTrackIds, account.favoriteArtistIds, account.favoriteAlbumIds, account.userPlaylistIds, account.deviceState);
+  client.playlistFavorites = account.playlistFavorites;
+  const createPlaylist = client.createPlaylist.bind(client);
+  client.createPlaylist = async (name) => {
+    const playlist = await createPlaylist(name);
+    account.playlistFavorites.set(playlist.id, false);
+    return { ...playlist, favorite: false };
+  };
+  const deletePlaylist = client.deletePlaylist.bind(client);
+  client.deletePlaylist = async (id) => {
+    const result = await deletePlaylist(id);
+    if (result.success) { account.playlistFavorites.remove(id); account.userPlaylistIds.delete(id); }
+    return result;
+  };
   if (client instanceof YTMusicClient && streamOrigin) {
     client.setStreamUrl((id, quality) => createStreamUrl(streamOrigin, account, id, quality));
   }
@@ -93,6 +106,10 @@ export function createWowContextResolver(
     const origin = host && /^[a-zA-Z0-9.:-]+$/.test(host) ? `${protocol}://${host}` : undefined;
     const adapter = createAdapter(account, lxTrackUrlResolver, origin);
     const needed = collectionStatusNeeded(request?.path || '');
+    if (needed.playlists && !account.playlistFavorites.loaded) {
+      // 未能重建账号快照时向调用方报告错误，避免把未知状态呈现为未收藏。
+      await adapter.getUserPlaylist();
+    }
     if (needed.artists && !account.favoriteArtistsLoaded) {
       try {
         await adapter.userArtists();

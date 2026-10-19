@@ -26,7 +26,7 @@ function formatUserCreatedPlaylists (userCreatedPlaylists) {
         avatarUrl: ''
       },
       userId: Number(playlist.uin),
-      subscribed: true,
+      subscribed: false,
       privacy: 0,
       description: playlist.desc || '',
       tags: playlist.tagNameList || []

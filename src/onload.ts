@@ -1,19 +1,14 @@
-import { QQClient } from './clients/QQClient';
-import { NeteaseClient } from './clients/NeteaseClient';
-import { YTMusicClient } from './clients/YTMusicClient';
+import { createAdapter } from './adapter';
 import type { AccountSessionRegistry, MusicAccountSession } from './accounts';
 import type { LxSourceLifecycle } from './lx-resource';
 
 export async function preloadSessionFavorites(session: MusicAccountSession): Promise<void> {
   if (!session.cookie.trim()) return;
-  const client = session.platform === 'ytmusic'
-    ? new YTMusicClient(session.cookie, session.favoriteTrackIds, session.favoriteArtistIds, session.favoriteAlbumIds, session.userPlaylistIds)
-    : session.platform === 'netease'
-    ? new NeteaseClient(session.cookie, session.favoriteTrackIds, session.favoriteArtistIds, session.favoriteAlbumIds, session.userPlaylistIds)
-    : new QQClient(session.cookie, session.favoriteTrackIds, session.favoriteArtistIds, session.favoriteAlbumIds, session.userPlaylistIds);
+  const client = createAdapter(session);
 
   for (const [label, load, markLoaded] of [
     ['tracks', () => client.userFavoriteTracks(), () => {}],
+    ['playlists', () => client.getUserPlaylist(), () => {}],
     ['artists', () => client.userArtists(), () => { session.favoriteArtistsLoaded = true; }],
     ['albums', () => client.userAlbums(), () => { session.favoriteAlbumsLoaded = true; }]
   ] as const) {
