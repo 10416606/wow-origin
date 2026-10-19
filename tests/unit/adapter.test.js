@@ -3,6 +3,38 @@ const { QQClient } = require('../../dist/clients/QQClient')
 const { NeteaseClient } = require('../../dist/clients/NeteaseClient')
 
 describe('Wow adapter', () => {
+  test.each(['qq', 'netease'])('洛雪 %s 母带失败后按 Hi-Res、24bit、SQ 下降，不自动选环绕声', async (platform) => {
+    const Client = platform === 'qq' ? QQClient : NeteaseClient
+    jest.spyOn(Client.prototype, 'getTrackDetail').mockResolvedValue({ id: 'song', qualities: [] })
+    jest.spyOn(Client.prototype, 'getTrackUrlForQuality').mockRejectedValue(new Error('unavailable'))
+    const resolveTrackUrl = jest.fn(async (_platform, _id, quality) => quality === 'lossless'
+      ? { url: 'https://audio.test/sq.flac', quality, size: 300 } : undefined)
+    const adapter = createAdapter({ platform, cookie: '', useLuoxue: true }, {
+      getTrackQualities: async () => ['master', 'sky', 'dolby', 'atmos51', 'hires', 'flac24bit', 'lossless'].map(key => ({ key, label: key })),
+      resolveTrackUrl
+    })
+    await expect(adapter.getTrackUrl('song', 'max')).resolves.toMatchObject({ quality: 'lossless', size: 300 })
+    expect(resolveTrackUrl.mock.calls.map(call => call[2])).toEqual(['master', 'hires', 'flac24bit', 'lossless'])
+  })
+
+  test('歌曲详情合并洛雪逐曲音质与真实大小，保留原有音质', async () => {
+    const sq = { key: 'lossless', label: 'SQ', size: 100 }
+    jest.spyOn(QQClient.prototype, 'getTrackDetail').mockResolvedValue({ id: 'song', qualities: [sq] })
+    const master = { key: 'master', label: '母带', size: 300, format: 'flac' }
+    const resolver = { getTrackQualities: jest.fn().mockResolvedValue([master]), resolveTrackUrl: jest.fn() }
+    const adapter = createAdapter({ platform: 'qq', cookie: '', useLuoxue: true }, resolver)
+    expect((await adapter.getTrackDetail('song')).qualities).toEqual([sq, master])
+    expect(resolver.getTrackQualities).toHaveBeenCalledWith('qq', 'song')
+  })
+
+  test('逐曲探测失败仍然返回官方歌曲详情', async () => {
+    const track = { id: 'song', qualities: [] }
+    jest.spyOn(QQClient.prototype, 'getTrackDetail').mockResolvedValue(track)
+    const adapter = createAdapter({ platform: 'qq', cookie: '' }, {
+      getTrackQualities: jest.fn().mockRejectedValue(new Error('timeout')), resolveTrackUrl: jest.fn()
+    })
+    expect(await adapter.getTrackDetail('song')).toEqual(track)
+  })
   afterEach(() => {
     jest.restoreAllMocks()
     delete global.__musicPlatformFactory__
