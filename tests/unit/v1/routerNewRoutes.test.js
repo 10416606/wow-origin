@@ -9,15 +9,15 @@ function createService(overrides = {}) {
     getToplist: jest.fn().mockResolvedValue([]),
     getToplistTracks: jest.fn().mockResolvedValue({ id: '26', name: '热歌榜', tracks: [] }),
     getNewTracks: jest.fn().mockResolvedValue([]),
-    getTrackRoam: jest.fn().mockResolvedValue([]),
+    getRoamTracks: jest.fn().mockResolvedValue([]),
     getTopArtists: jest.fn().mockResolvedValue([]),
     getArtistDetail: jest.fn().mockResolvedValue({ artist: { id: 'artist-1', name: '歌手' }, tracks: [] }),
     getArtistTracks: jest.fn().mockResolvedValue({ items: [], offset: 0, limit: 50, hasMore: false }),
     getArtistAlbums: jest.fn().mockResolvedValue({ items: [], offset: 0, limit: 50, hasMore: false }),
     getAlbumDetail: jest.fn().mockResolvedValue({ album: { id: 'album-1', name: '专辑' }, tracks: [] }),
-    createPlaylist: jest.fn().mockResolvedValue({ id: 'playlist-1', name: '新歌单', description: '', coverUrl: '', trackCount: 0, playCount: 0, favoriteCount: 0, tags: [], creator: { id: 'me', name: '', avatarUrl: '' }, createdAt: null, updatedAt: null }),
+    createPlaylist: jest.fn().mockResolvedValue({ id: 'playlist-1', name: '新歌单', description: '', coverUrl: '', trackCount: 0, playCount: 0, favorite: false, tags: [], creator: { id: 'me', name: '', avatarUrl: '' }, createdAt: null, updatedAt: null }),
     deletePlaylist: jest.fn().mockResolvedValue({ success: true }),
-    updatePlaylist: jest.fn().mockResolvedValue({ id: 'playlist-1', name: '新名称', description: '简介', coverUrl: '', trackCount: 0, playCount: 0, favoriteCount: 0, tags: [], creator: { id: 'me', name: '', avatarUrl: '' }, createdAt: null, updatedAt: null }),
+    updatePlaylist: jest.fn().mockResolvedValue({ id: 'playlist-1', name: '新名称', description: '简介', coverUrl: '', trackCount: 0, playCount: 0, favorite: false, tags: [], creator: { id: 'me', name: '', avatarUrl: '' }, createdAt: null, updatedAt: null }),
     addTrackToPlaylist: jest.fn().mockResolvedValue({ success: true }),
     removeTrack: jest.fn().mockResolvedValue({ success: true }),
     favoritePlaylist: jest.fn().mockResolvedValue({ success: true, status: true }),
@@ -125,7 +125,7 @@ describe('v1 新增路由', () => {
     const redirect = await request(app).get('/v1/track/fm').expect(308)
 
     expect(redirect.headers.location).toBe('/v1/track/roam')
-    expect(service.getTrackRoam).toHaveBeenCalledTimes(1)
+    expect(service.getRoamTracks).toHaveBeenCalledTimes(1)
   })
 
   test('艺人和专辑详情路由使用 query id，不再使用路径参数', async () => {

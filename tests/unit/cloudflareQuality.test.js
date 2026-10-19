@@ -4,7 +4,7 @@ jest.mock('../../cloudflare/generated/lx-source', () => ({
     lx.on('request', (request) => global.lxQualityHandler(request))
     lx.send('inited', { sources: { tx: { actions: ['musicUrl'], qualitys: global.lxCapabilities || ['128k', '320k', 'flac', 'flac24bit', 'hires', 'master'] } } })
   }
-}))
+}), { virtual: true })
 const { CloudflareLxSourceManager } = require('../../cloudflare/lx-manager')
 
 describe('Cloudflare extended LX quality', () => {

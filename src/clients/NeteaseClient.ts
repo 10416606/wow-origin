@@ -1,11 +1,10 @@
 import type { Album, AlbumDetail, AlbumPage, Artist, ArtistDetail, ArtistPage, Playlist, PlaylistCategory, PlaylistDetail, PlaylistPage, SearchSuggest, ToplistGroup, Track, TrackLyrics, TrackPage, TrackUrl, UserProfile } from 'aduoer-wow-sdk';
 import { mapAlbum, mapAlbumDetail, mapArtist, mapArtistDetail, mapPlaylist, mapSearchSuggest, mapTrack, mapTrackLyrics, mapTrackUrl, mapUserDetail } from '../mappers/netease';
 import { MusicClientBase } from './MusicClientBase';
-import { NotFoundError } from '../errors';
+import { NotFoundError, UnplayableError } from '../errors';
 import { getNeteasePlaylistCategoryMap } from '../playlistCategories';
-import { isNeteaseEnhancedQuality } from '../quality';
+import { resolveTrackUrlWithFallback } from '../trackUrl';
 
-const DEFAULT_NETEASE_QUALITY = 'exhigh';
 const NETEASE_NO_LYRICS_PLACEHOLDER = '[00:00.00]暂无歌词';
 
 export class NeteaseClient extends MusicClientBase {
@@ -32,7 +31,7 @@ export class NeteaseClient extends MusicClientBase {
     }
 
     const raw = await this.call('top_playlist', { offset, limit, total: true, cat: label });
-    const items = (raw.playlists || raw.playlist || raw.toplists || []).map((item: any) => mapPlaylist(item));
+    const items = (raw.playlists || raw.playlist || raw.toplists || []).map((item: any) => this.playlistFavorites.apply(mapPlaylist(item)));
     return { items, offset, limit, hasMore: items.length === limit };
   }
 
@@ -69,7 +68,7 @@ export class NeteaseClient extends MusicClientBase {
       throw new NotFoundError('Toplist not found');
     }
     const tracks = (playlist.tracks || []).slice(0, limit).map((item: any) => this.withFavoriteTrack(mapTrack(item)));
-    return { ...mapPlaylist(playlist), tracks };
+    return this.playlistFavorites.apply({ ...mapPlaylist(playlist), tracks });
   }
 
   async getNewTracks(): Promise<Track[]> {
@@ -86,7 +85,7 @@ export class NeteaseClient extends MusicClientBase {
 
   async getRecommendedPlaylist(offset: number, limit: number): Promise<PlaylistPage> {
     const raw = await this.call('personalized', { offset, limit });
-    const items = (raw.result || raw.playlists || []).map((item: any) => mapPlaylist(item));
+    const items = (raw.result || raw.playlists || []).map((item: any) => this.playlistFavorites.apply(mapPlaylist(item)));
     return { items, offset, limit, hasMore: items.length === limit };
   }
 
@@ -97,7 +96,8 @@ export class NeteaseClient extends MusicClientBase {
       throw new NotFoundError('Playlist not found');
     }
     const tracks = trackLimit !== 0 ? (playlist.tracks || []).slice(0, trackLimit === -1 ? 1000 : trackLimit).map((item: any) => this.withFavoriteTrack(mapTrack(item))) : [];
-    return { ...mapPlaylist(playlist), tracks };
+    return this.playlistFavorites.apply({ ...mapPlaylist(playlist), tracks },
+      typeof playlist.subscribed === 'boolean' ? playlist.subscribed : undefined);
   }
 
   async getDailyTracks(): Promise<Track[]> {
@@ -106,7 +106,7 @@ export class NeteaseClient extends MusicClientBase {
     return tracks.map((item: any) => this.withFavoriteTrack(mapTrack(item)));
   }
 
-  async getTrackRoam(): Promise<Track[]> {
+  async getRoamTracks(): Promise<Track[]> {
     const raw = await this.call('personal_fm');
     const tracks = this.toArrayPayload(raw, ['tracks', 'songs', 'data']);
     return tracks.map((item: any) => this.withFavoriteTrack(mapTrack(item)));
@@ -131,43 +131,18 @@ export class NeteaseClient extends MusicClientBase {
   }
 
   async getTrackUrl(id: string, quality?: string): Promise<TrackUrl> {
-    const enhancedQuality = isNeteaseEnhancedQuality(quality);
-    const qualityCandidates = !quality
-      ? [DEFAULT_NETEASE_QUALITY, 'standard']
-      : quality === 'max'
-      ? ['master', 'lossless', 'exhigh', 'standard']
-      : quality === 'min'
-        ? ['standard', 'exhigh', 'lossless', 'hires', 'master']
-        : enhancedQuality
-          ? [quality, 'lossless', 'exhigh', 'standard']
-          : [quality];
-    let lastError: unknown;
+    return resolveTrackUrlWithFallback('netease', quality, () => this.getTrackDetail(id), (candidate) => this.getTrackUrlForQuality(id, candidate));
+  }
 
-    for (const candidate of qualityCandidates) {
-      let raw: any;
-      try {
-        raw = await this.call('song_url_xeapi', { id, level: candidate });
-      } catch (error) {
-        if (qualityCandidates.length === 1) throw error;
-        lastError = error;
-        continue;
-      }
-      const candidates = [
-        raw?.data,
-        raw?.body?.data,
-        raw?.songs,
-        raw
-      ];
-      const audio = candidates
-        .flatMap((candidate) => Array.isArray(candidate) ? candidate : [candidate])
-        .find((item) => item?.url);
-      if (audio?.url) {
-        return mapTrackUrl({ ...audio, level: audio.level || candidate });
-      }
-    }
-
-    if (lastError) throw lastError;
-    throw new NotFoundError('Song has no playable audio URL');
+  async getTrackUrlForQuality(id: string, quality: string): Promise<TrackUrl> {
+    const raw = await this.call('song_url_xeapi', { id, level: quality });
+    const audio = [raw?.data, raw?.body?.data, raw?.songs, raw]
+      .flatMap((candidate) => Array.isArray(candidate) ? candidate : [candidate])
+      .find((item) => item?.url);
+    if (!audio?.url) throw new NotFoundError('Song has no playable audio URL');
+    // 网易会在无完整播放权限时返回有效试听 URL；必须在映射丢弃试听信息前识别。
+    if (audio.freeTrialInfo) throw new UnplayableError('Song only has a trial audio URL');
+    return mapTrackUrl({ ...audio, level: audio.level || quality });
   }
 
   async getTrackLyrics(id: string): Promise<TrackLyrics> {
@@ -226,7 +201,7 @@ export class NeteaseClient extends MusicClientBase {
   async searchPlaylists(keyword: string, offset: number, limit: number): Promise<PlaylistPage> {
     const raw = await this.call('cloudsearch', { keywords: keyword, type: 1000, offset, limit });
     const result = raw.result || raw;
-    const items = Array.isArray(result.playlists) ? result.playlists.map((item: any) => mapPlaylist(item)) : [];
+    const items = Array.isArray(result.playlists) ? result.playlists.map((item: any) => this.playlistFavorites.apply(mapPlaylist(item))) : [];
     const total = result.playlistCount || items.length;
     return { items, offset, limit, hasMore: offset + items.length < total };
   }
@@ -378,10 +353,11 @@ export class NeteaseClient extends MusicClientBase {
 
   async favoritePlaylist(id: string, status: boolean): Promise<{ success: boolean; status: boolean }> {
     const raw = await this.call('playlist_subscribe', { id, t: status ? 1 : 0 });
-    if (Number(raw.code) === 501) {
+    if (raw.code !== undefined && Number(raw.code) !== 200) {
       return { success: false, status };
     }
     this.setUserPlaylist(id, status);
+    this.playlistFavorites.set(id, status);
     return { success: true, status };
   }
 

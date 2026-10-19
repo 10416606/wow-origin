@@ -1,3 +1,4 @@
+import { PlaylistFavorites } from '../playlistFavorites';
 import type {
   Album,
   AlbumDetail,
@@ -26,6 +27,7 @@ const defaultPlatformFactory = require('../../platforms/PlatformFactory');
 const { globalCache } = require('../../core/PlatformCache');
 
 export abstract class MusicClientBase implements WowAdapter {
+  public playlistFavorites = new PlaylistFavorites();
   protected readonly cookie: string;
   protected readonly platform: MusicPlatform;
   protected readonly favoriteTrackSet: Set<string>;
@@ -104,6 +106,7 @@ export abstract class MusicClientBase implements WowAdapter {
   }
 
   protected replaceUserPlaylists(playlists: Playlist[]): void {
+    this.playlistFavorites.replace(playlists);
     this.userPlaylistSet.clear();
     playlists.forEach((playlist) => this.userPlaylistSet.add(playlist.id));
   }
@@ -223,7 +226,7 @@ export abstract class MusicClientBase implements WowAdapter {
   abstract getRecommendedPlaylist(offset: number, limit: number): Promise<PlaylistPage>;
   abstract getPlaylistDetail(id: string, trackLimit?: number): Promise<PlaylistDetail>;
   abstract getDailyTracks(): Promise<Track[]>;
-  abstract getTrackRoam(): Promise<Track[]>;
+  abstract getRoamTracks(): Promise<Track[]>;
   abstract getTrackDetail(id: string): Promise<Track>;
   abstract getSimilarTracks(id: string): Promise<Track[]>;
   abstract getTrackUrl(id: string, quality?: string): Promise<TrackUrl>;

@@ -1,6 +1,6 @@
 {
   "name": "wow-origin",
-  "version": "1.0.3",
+  "version": "1.0.5",
   "description": "多平台音乐API服务器，提供网易云音乐、QQ音乐等平台的统一API接口",
   "main": "dist/server.js",
   "scripts": {
@@ -43,7 +43,7 @@
   },
   "dependencies": {
     "@noble/curves": "^2.4.0",
-    "aduoer-wow-sdk": "0.3.1",
+    "aduoer-wow-sdk": "0.3.4",
     "axios": "^1.18.1",
     "cookie-parser": "^1.4.7",
     "dotenv": "^17.4.2",

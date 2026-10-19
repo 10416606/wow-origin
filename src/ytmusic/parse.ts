@@ -74,7 +74,8 @@ export function mapPlaylist(value: any): Playlist {
     name: String(value?.name || value?.title || first?.text || text(row?.title) || ''),
     description: String(value?.description || ''),
     coverUrl: thumbnail(row) || thumbnail(value),
-    trackCount: Number.isFinite(count) ? count : 0
+    trackCount: Number.isFinite(count) ? count : 0,
+    favorite: false
   };
 }
 

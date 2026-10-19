@@ -1,3 +1,4 @@
+import { PlaylistFavorites } from './playlistFavorites';
 import path from 'path';
 import { randomUUID } from 'crypto';
 import type { MusicPlatform } from './types';
@@ -27,6 +28,7 @@ export interface MusicAccountSession {
   deviceState?: string;
   favoriteTrackIds: Set<string>;
   userPlaylistIds: Set<string>;
+  playlistFavorites: PlaylistFavorites;
   favoriteArtistIds: Set<string>;
   favoriteAlbumIds: Set<string>;
   favoriteArtistsLoaded: boolean;
@@ -49,6 +51,7 @@ function qqDeviceFields(cookie: string): { deviceId?: string; deviceState?: stri
 }
 
 export interface AccountSessionRegistry {
+  onDeleted?: Set<(session: MusicAccountSession) => void>;
   sessions: MusicAccountSession[];
   byAccessKey: Map<string, MusicAccountSession>;
 }
@@ -281,6 +284,7 @@ export function loadAccountSessions(storeInput: AccountStoreInput = process.cwd(
         ...(account.deviceState ? { deviceState: String(account.deviceState) } : {}),
         favoriteTrackIds: new Set<string>(),
         userPlaylistIds: new Set<string>(),
+        playlistFavorites: new PlaylistFavorites(),
         favoriteArtistIds: new Set<string>(),
         favoriteAlbumIds: new Set<string>(),
         favoriteArtistsLoaded: false,
@@ -441,6 +445,7 @@ export function createAccountWithCookie(
     ...(account.deviceState ? { deviceState: String(account.deviceState) } : {}),
     favoriteTrackIds: new Set<string>(),
     userPlaylistIds: new Set<string>(),
+    playlistFavorites: new PlaylistFavorites(),
     favoriteArtistIds: new Set<string>(),
     favoriteAlbumIds: new Set<string>(),
     favoriteArtistsLoaded: false,
@@ -490,4 +495,27 @@ export function updateAccountConfigByAccessKey(
   session.useLuoxue = input.useLuoxue;
   session.lxSource = lxSource;
   return { session, filePath: store.location };
+}
+
+/** Persist deletion before revoking the live account and all registered account state. */
+export function deleteAccount(apiAccessKey: string, registry: AccountSessionRegistry, store: AccountStore): void {
+  const session = registry.byAccessKey.get(apiAccessKey);
+  if (!session) throw new Error('账号不存在');
+  store.delete(apiAccessKey);
+  registry.byAccessKey.delete(apiAccessKey);
+  const index = registry.sessions.indexOf(session);
+  if (index >= 0) registry.sessions.splice(index, 1);
+  for (const cleanup of registry.onDeleted ?? []) cleanup(session);
+  const musicid = qqMusicid(session.cookie);
+  if (session.platform === 'qq' && !registry.sessions.some(item => item.platform === 'qq' && qqMusicid(item.cookie) === musicid)) {
+    qqAndroid.forgetAndroidLoginContext(musicid);
+  }
+  for (const set of [session.favoriteTrackIds, session.favoriteArtistIds, session.favoriteAlbumIds, session.userPlaylistIds]) {
+    set.clear();
+    // In-flight clients retain these sets; prevent late responses from repopulating them.
+    set.add = () => set;
+  }
+  session.cookie = ''; session.deviceId = undefined; session.deviceState = undefined;
+  session.playlistFavorites.clear();
+  session.lxSource = []; session.favoriteArtistsLoaded = false; session.favoriteAlbumsLoaded = false;
 }

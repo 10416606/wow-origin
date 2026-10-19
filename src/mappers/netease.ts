@@ -65,7 +65,7 @@ export function mapPlaylist(playlist: any = {}): Playlist {
     coverUrl: playlist.coverImgUrl || playlist.picUrl || '',
     trackCount: Number(playlist.trackCount) || 0,
     playCount: Number(playlist.playCount) || 0,
-    favoriteCount: Number(playlist.subCount) || 0,
+    favorite: playlist.subscribed === true,
     tags: Array.isArray(playlist.tags) ? playlist.tags.filter(Boolean) : [],
     creator: mapCreator(playlist.creator),
     createdAt: normalizeTimestamp(playlist.createTime),

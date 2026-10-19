@@ -12,6 +12,7 @@ const {
   selectLxQuality,
   millisecondsUntilNextOneAm
 } = require('../../../dist/lx-resource')
+const { getExactLxQuality } = require('../../../dist/lx-resource/quality')
 
 const validScript = `/**
  * @name 测试源
@@ -125,6 +126,8 @@ describe('LX resource', () => {
     expect(selectLxQuality('standard', ['320k'])).toBeUndefined()
     expect(selectLxQuality('max', ['128k', 'flac24bit'])).toBe('flac24bit')
     expect(selectLxQuality('max', ['flac', 'hires', 'atmos', 'master'], 'qq')).toBe('master')
+    expect(getExactLxQuality('qq', 'master', ['flac', 'master'])).toBe('master')
+    expect(getExactLxQuality('qq', 'master', ['flac'])).toBeUndefined()
     expect(parseLxScriptInfo(`/*!
       * @name 感叹号文件头
       */`).name).toBe('感叹号文件头')
@@ -214,6 +217,29 @@ describe('LX resource', () => {
       expect(downloadSource).not.toHaveBeenCalled()
     } finally {
       await manager.stop()
+    }
+  })
+
+  test('外层按歌曲详情控制降级时，洛雪只尝试指定档位', async () => {
+    const url = 'https://source.test/exact-quality.js'
+    const hash = md5(url)
+    const cacheDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'wow-lx-exact-'))
+    const script = validScript.replace('const digest =', "if (info.type === 'flac') throw new Error('SQ unavailable')\n  const digest =")
+    await fs.writeFile(getLxSourceCachePath(cacheDirectory, hash), script)
+    const manager = new LxSourceManager({ configs: [{ url, hash, order: 0 }], cacheDirectory })
+    const options = { allowFallback: false }
+    jest.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      manager.start()
+      await manager.waitForInitialLoad()
+      // SQ 请求失败时不能自行尝试 HQ；缺少 Hi-Res 时也不能自行选择 SQ。
+      await expect(manager.resolveTrackUrl('qq', 'track', 'lossless', [], options)).resolves.toBeUndefined()
+      await expect(manager.resolveTrackUrl('netease', 'track', 'hires', [], options)).resolves.toBeUndefined()
+      await expect(manager.resolveTrackUrl('qq', 'track', 'higher', [], options)).resolves.toBeUndefined()
+      await expect(manager.resolveTrackUrl('qq', 'track', 'exhigh', [], options)).resolves.toMatchObject({ quality: 'exhigh' })
+    } finally {
+      await manager.stop()
+      await fs.rm(cacheDirectory, { recursive: true, force: true })
     }
   })
 

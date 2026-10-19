@@ -1,3 +1,4 @@
+import { PlaylistFavorites } from '../playlistFavorites';
 import type {
   Album, AlbumDetail, AlbumPage, Artist, ArtistDetail, ArtistPage, Playlist, PlaylistCategory, Quality,
   PlaylistDetail, PlaylistPage, SearchSuggest, ToplistGroup, Track, TrackLyrics, TrackPage,
@@ -15,6 +16,7 @@ const SEARCH_PARAMS: Record<string, string> = {
   playlists: 'Eg-KAQwIABAAGAAgACgBMABqChAEEAMQCRAFEAo%3D'
 };
 
+let rawTrackCacheGeneration = 0;
 const rawTrackUrlCache = new Map<string, { value: TrackUrl; expiresAt: number }>();
 const rawTrackUrlRequests = new Map<string, Promise<TrackUrl>>();
 
@@ -66,6 +68,7 @@ function isPlaylistId(id: string): boolean { return /^(PL|RD|OLAK|LM)/.test(id);
 
 export class YTMusicClient implements WowAdapter {
   private readonly api: YTMusicApi;
+  public playlistFavorites = new PlaylistFavorites();
   private streamUrl?: (id: string, quality: string) => string;
 
   constructor(
@@ -138,7 +141,7 @@ export class YTMusicClient implements WowAdapter {
 
   async searchPlaylists(keyword: string, offset: number, limit: number): Promise<PlaylistPage> {
     const { items, more } = await this.search('playlists', keyword, offset, limit);
-    const mapped = items.map(mapPlaylist).filter((playlist) => playlist.id);
+    const mapped = items.map(mapPlaylist).filter((playlist) => playlist.id).map((playlist) => this.playlistFavorites.apply(playlist));
     return page(mapped, offset, limit, more || offset + limit < mapped.length);
   }
 
@@ -156,14 +159,19 @@ export class YTMusicClient implements WowAdapter {
       .slice(0, trackLimit < 0 ? undefined : trackLimit).map((track) => this.withTrack(track));
     const countText = text(header.secondSubtitle);
     const count = Number(countText.match(/([\d,]+) (?:songs|tracks)/)?.[1]?.replace(/,/g, '') || tracks.length);
-    return {
+    const own = findAll(response, 'musicEditablePlaylistDetailHeaderRenderer', 1).length > 0;
+    const user = own ? await this.getUserMe() : undefined;
+    const likeStatus = findAll(response, 'likeButtonRenderer', 1)[0]?.likeStatus;
+    return this.playlistFavorites.apply({
       id: normalized,
       name: text(header.title),
       description: text(at(header, 'description', 'musicDescriptionShelfRenderer', 'description')),
       coverUrl: thumbnail(header),
       trackCount: count,
-      tracks
-    };
+      tracks,
+      favorite: false,
+      ...(user ? { creator: { id: user.userId, name: user.nickname, avatarUrl: user.avatar } } : {})
+    }, own ? false : likeStatus ? likeStatus === 'LIKE' : undefined);
   }
 
   async getAlbumDetail(id: string, trackLimit = -1): Promise<AlbumDetail> {
@@ -248,6 +256,7 @@ export class YTMusicClient implements WowAdapter {
   }
 
   async getRawTrackUrl(id: string, quality = 'higher'): Promise<TrackUrl> {
+    const generation = rawTrackCacheGeneration;
     const key = rawTrackCacheKey(this.cookie, id, quality);
     const cached = rawTrackUrlCache.get(key);
     if (cached && cached.expiresAt > Date.now()) return cached.value;
@@ -269,7 +278,7 @@ export class YTMusicClient implements WowAdapter {
         size: Number(selected.contentLength) || 0
       };
       const expiresAt = rawTrackCacheExpiry(result.url);
-      if (expiresAt > Date.now()) {
+      if (generation === rawTrackCacheGeneration && expiresAt > Date.now()) {
         rawTrackUrlCache.set(key, { value: result, expiresAt });
         if (rawTrackUrlCache.size > 256) rawTrackUrlCache.delete(rawTrackUrlCache.keys().next().value!);
       }
@@ -318,7 +327,7 @@ export class YTMusicClient implements WowAdapter {
     }).filter((track) => track.id && track.id !== id);
   }
 
-  async getTrackRoam(): Promise<Track[]> {
+  async getRoamTracks(): Promise<Track[]> {
     const tracks = await this.getDailyTracks();
     const seed = tracks[0] || (await this.getNewTracks())[0];
     return seed ? this.getSimilarTracks(seed.id) : [];
@@ -326,12 +335,12 @@ export class YTMusicClient implements WowAdapter {
 
   async getRecommendedPlaylist(offset: number, limit: number): Promise<PlaylistPage> {
     const response = await this.api.browse('FEmusic_home');
-    let items = tiles(response).map(mapPlaylist).filter((item) => isPlaylistId(item.id));
+    let items = tiles(response).map(mapPlaylist).filter((item) => isPlaylistId(item.id)).map((playlist) => this.playlistFavorites.apply(playlist));
     if (!items.length && this.cookie) {
       // Signed-in home shelves can contain only albums and non-browsable radio mixes.
       // Use the public home playlists so the Wow playlist shelf remains usable.
       const publicHome = await new YTMusicApi('').browse('FEmusic_home');
-      items = tiles(publicHome).map(mapPlaylist).filter((item) => isPlaylistId(item.id));
+      items = tiles(publicHome).map(mapPlaylist).filter((item) => isPlaylistId(item.id)).map((playlist) => this.playlistFavorites.apply(playlist));
     }
     return page(items, offset, limit, offset + limit < items.length);
   }
@@ -371,9 +380,26 @@ export class YTMusicClient implements WowAdapter {
 
   async getUserPlaylist(): Promise<Playlist[]> {
     this.requireLogin();
-    const response = await this.api.browse('FEmusic_liked_playlists');
-    const items = [...tiles(response), ...rows(response)].map(mapPlaylist).filter((item) => item.id);
+    let response = await this.api.browse('FEmusic_liked_playlists');
+    const rawItems = [...tiles(response), ...rows(response)];
+    const seenTokens = new Set<string>();
+    let token = continuation(response);
+    while (token && !seenTokens.has(token)) {
+      seenTokens.add(token);
+      response = await this.api.request('browse', { continuation: token });
+      rawItems.push(...tiles(response), ...rows(response));
+      token = continuation(response);
+    }
+    const unique = new Map(rawItems.map((value) => { const item = mapPlaylist(value); return [item.id, item]; }));
+    const items: Playlist[] = [];
+    for (const item of unique.values()) {
+      if (!item.id || item.id === 'LM') continue;
+      // 编辑头部是上游可靠的所有权信号；列表项缺少作者身份，读取轻量详情确认。
+      const detail = await this.getPlaylistDetail(item.id, 0);
+      items.push({ ...item, creator: detail.creator, favorite: !detail.creator });
+    }
     this.savedPlaylists.clear(); items.forEach((item) => this.savedPlaylists.add(item.id));
+    this.playlistFavorites.replace(items);
     return items;
   }
 
@@ -434,6 +460,7 @@ export class YTMusicClient implements WowAdapter {
     const response = await this.api.request(status ? 'like/like' : 'like/removelike', { target: { playlistId: id } });
     if (!succeeded(response)) throw new UpstreamError('YouTube Music 收藏歌单失败');
     if (status) this.savedPlaylists.add(id); else this.savedPlaylists.delete(id);
+    this.playlistFavorites.set(id, status);
     return { success: true, status };
   }
 
@@ -452,7 +479,9 @@ export class YTMusicClient implements WowAdapter {
     this.requireLogin();
     const response = await this.api.request('playlist/create', { title: name, description: '', privacyStatus: 'PRIVATE' });
     if (!response.playlistId) throw new UpstreamError('YouTube Music 创建歌单失败');
-    return { id: response.playlistId, name, description: '', coverUrl: '', trackCount: 0 };
+    const user = await this.getUserMe();
+    return { id: response.playlistId, name, description: '', coverUrl: '', trackCount: 0, favorite: false,
+      creator: { id: user.userId, name: user.nickname, avatarUrl: user.avatar } };
   }
 
   async deletePlaylist(id: string): Promise<{ success: boolean }> {
@@ -497,4 +526,11 @@ export class YTMusicClient implements WowAdapter {
     if (!succeeded(result)) throw new UpstreamError('YouTube Music 移除歌曲失败');
     return { success: true };
   }
+}
+
+export function clearYTMusicTrackCache(cookie: string): void {
+  rawTrackCacheGeneration += 1;
+  const prefix = `${createHash('sha256').update(cookie).digest('hex')}:`;
+  for (const key of rawTrackUrlCache.keys()) if (key.startsWith(prefix)) rawTrackUrlCache.delete(key);
+  for (const key of rawTrackUrlRequests.keys()) if (key.startsWith(prefix)) rawTrackUrlRequests.delete(key);
 }

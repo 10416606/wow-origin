@@ -6,6 +6,7 @@ import type { TrackUrl } from 'aduoer-wow-sdk';
 import type { AppLxSourceManager } from '../src/app';
 import type { MusicPlatform } from '../src/types';
 import type { LxPlatform, LxQuality } from '../src/lx-resource/types';
+import { getExactLxQuality } from '../src/lx-resource/quality';
 import { bundledLxSource, installBundledLxSource } from './generated/lx-source';
 
 const EVENT_NAMES = { request: 'request', inited: 'inited', updateAlert: 'updateAlert' } as const;
@@ -339,16 +340,25 @@ export class CloudflareLxSourceManager implements AppLxSourceManager {
   async updateAll(): Promise<void> {}
   async stop(): Promise<void> {}
 
-  async resolveTrackUrl(platform: MusicPlatform, id: string, requestedQuality?: string): Promise<TrackUrl | undefined> {
+  async resolveTrackUrl(
+    platform: MusicPlatform,
+    id: string,
+    requestedQuality?: string,
+    _accountSources: readonly string[] = [],
+    options: { allowFallback?: boolean } = {}
+  ): Promise<TrackUrl | undefined> {
     if (platform === 'ytmusic' || requestedQuality === 'jyeffect') return undefined;
-    const supported = this.capabilities[platform === 'qq' ? 'tx' : 'wy']?.qualities || [];
-    const selected = selectQuality(requestedQuality, supported);
+    const source: LxPlatform = platform === 'qq' ? 'tx' : 'wy';
+    const supported = this.capabilities[source]?.qualities || [];
+    const exact = getExactLxQuality(platform, requestedQuality, supported);
+    const selected = options.allowFallback === false ? exact : selectQuality(requestedQuality, supported);
     if (!selected) return undefined;
-    const candidates = QUALITIES.slice(0, QUALITIES.indexOf(selected) + 1).reverse()
-      .filter((quality) => supported.includes(quality))
-      .filter((quality) => requestedQuality === 'sky'
-        ? ['atmos', 'flac', '320k', '128k'].includes(quality)
-        : quality !== 'atmos');
+    const candidates = options.allowFallback === false ? [selected]
+      : QUALITIES.slice(0, QUALITIES.indexOf(selected) + 1).reverse()
+        .filter((quality) => supported.includes(quality))
+        .filter((quality) => requestedQuality === 'sky'
+          ? ['atmos', 'flac', '320k', '128k'].includes(quality)
+          : quality !== 'atmos');
     const deadline = Date.now() + 25_000;
     for (const quality of candidates) {
       const remaining = deadline - Date.now();

@@ -73,7 +73,7 @@ function formatUserPlaylist(data, uid, query, offset) {
       avatarUrl: toHttps(playlist.creator?.avatarUrl || '')
     },
     userId: Number(playlist.userId || playlist.creator?.userId || uid) || undefined,
-    subscribed: Boolean(playlist.subscribed ?? (playlist.creator?.userId != uid && playlist.userId != uid)),
+    subscribed: playlist.creator?.userId != uid && playlist.userId != uid,
     privacy: playlist.privacy,
     description: playlist.description,
     tags: playlist.tags

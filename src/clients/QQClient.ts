@@ -3,15 +3,7 @@ import { mapAlbum, mapAlbumDetail, mapArtist, mapArtistDetail, mapPlaylist, mapS
 import { MusicClientBase } from './MusicClientBase';
 import { NotFoundError, UnplayableError } from '../errors';
 import { getQQPlaylistCategoryEntries, getQQPlaylistCategoryMap } from '../playlistCategories';
-
-const DEFAULT_QQ_QUALITY = 'exhigh';
-
-export function getQualityCandidates(quality?: string): string[] {
-  if (!quality) return [DEFAULT_QQ_QUALITY, 'higher', 'standard'];
-  if (quality === 'max') return ['lossless', 'exhigh', 'higher', 'standard'];
-  if (quality === 'min') return ['standard', 'higher', 'exhigh', 'lossless'];
-  return [quality];
-}
+import { resolveTrackUrlWithFallback } from '../trackUrl';
 
 export function normalizeQQCredentials(cookie: string = ''): { uin: string; qm_keyst: string } {
   const getCookie = (name: string): string => {
@@ -32,13 +24,15 @@ export class QQClient extends MusicClientBase {
   private readonly uin: string;
   private readonly qm_keyst: string;
   private readonly qqLoginType: string;
+  private readonly deviceState?: string;
 
-  constructor(cookie: string, favoriteTrackSet?: Set<string>, favoriteArtistSet?: Set<string>, favoriteAlbumSet?: Set<string>, userPlaylistSet?: Set<string>) {
+  constructor(cookie: string, favoriteTrackSet?: Set<string>, favoriteArtistSet?: Set<string>, favoriteAlbumSet?: Set<string>, userPlaylistSet?: Set<string>, deviceState?: string) {
     super(cookie, 'qq', favoriteTrackSet, favoriteArtistSet, favoriteAlbumSet, userPlaylistSet);
     const credentials = normalizeQQCredentials(cookie);
     this.uin = credentials.uin;
     this.qm_keyst = credentials.qm_keyst;
     this.qqLoginType = this.getCookieValue('loginType') || '2';
+    this.deviceState = deviceState;
   }
 
   private async call(route: string, query: Record<string, any> = {}, keepEnvelope = false): Promise<any> {
@@ -59,7 +53,7 @@ export class QQClient extends MusicClientBase {
 
     const query = { offset, limit, category: resolvedCategory };
     const playlists = await this.call('top_playlist', query);
-    const items = (playlists.playlists || playlists.toplists || []).map((item: any) => mapPlaylist(item));
+    const items = (playlists.playlists || playlists.toplists || []).map((item: any) => this.playlistFavorites.apply(mapPlaylist(item)));
     return { items, offset, limit, hasMore: items.length === limit };
   }
 
@@ -96,7 +90,7 @@ export class QQClient extends MusicClientBase {
       throw new NotFoundError('Toplist not found');
     }
     const tracks = (playlist.tracks || []).map((item: any) => this.withFavoriteTrack(mapTrack(item)));
-    return { ...mapPlaylist(playlist), tracks };
+    return this.playlistFavorites.apply({ ...mapPlaylist(playlist), tracks });
   }
 
   async getNewTracks(): Promise<Track[]> {
@@ -113,7 +107,7 @@ export class QQClient extends MusicClientBase {
 
   async getRecommendedPlaylist(offset: number, limit: number): Promise<PlaylistPage> {
     const result = await this.call('personalized', { offset, limit });
-    const items = (result.result || []).map((item: any) => mapPlaylist(item));
+    const items = (result.result || []).map((item: any) => this.playlistFavorites.apply(mapPlaylist(item)));
     return { items, offset, limit, hasMore: items.length === limit };
   }
 
@@ -125,7 +119,8 @@ export class QQClient extends MusicClientBase {
       throw new NotFoundError('Playlist not found');
     }
     const tracks = trackLimit !== 0 ? (playlist.tracks || []).slice(0, upstreamLimit).map((item: any) => this.withFavoriteTrack(mapTrack(item))) : [];
-    return { ...mapPlaylist(playlist), tracks };
+    return this.playlistFavorites.apply({ ...mapPlaylist(playlist), tracks },
+      typeof playlist.subscribed === 'boolean' ? playlist.subscribed : undefined);
   }
 
   async getDailyTracks(): Promise<Track[]> {
@@ -134,7 +129,7 @@ export class QQClient extends MusicClientBase {
     return tracks.map((track: any) => this.withFavoriteTrack(mapTrack(track)));
   }
 
-  async getTrackRoam(): Promise<Track[]> {
+  async getRoamTracks(): Promise<Track[]> {
     const result = await this.call('personal_fm');
     const tracks = this.toArrayPayload(result, ['tracks', 'songs', 'data']);
     return tracks.map((track: any) => this.withFavoriteTrack(mapTrack(track)));
@@ -161,22 +156,18 @@ export class QQClient extends MusicClientBase {
   }
 
   async getTrackUrl(id: string, quality?: string): Promise<TrackUrl> {
-    let resolvedAudio: any | undefined;
+    return resolveTrackUrlWithFallback('qq', quality, () => this.getTrackDetail(id), (candidate) => this.getTrackUrlForQuality(id, candidate));
+  }
 
-    for (const candidate of getQualityCandidates(quality)) {
-      const result = await this.call('song_url', { mid: id, level: candidate });
-      const audio = Array.isArray(result) ? result[0] : result.data?.[0] || result.data || result.songs?.[0];
-      if (audio?.url) {
-        resolvedAudio = { ...audio, level: candidate };
-        break;
-      }
-    }
-
-    if (!resolvedAudio) {
-      throw new UnplayableError('Song has no playable audio URL');
-    }
-
-    return mapTrackUrl(resolvedAudio);
+  async getTrackUrlForQuality(id: string, quality: string): Promise<TrackUrl> {
+    const result = await this.call('song_url', {
+      mid: id, level: quality,
+      ...(this.deviceState ? { qq_android_identity: this.deviceState } : {}),
+      loginType: this.qqLoginType
+    });
+    const audio = Array.isArray(result) ? result[0] : result.data?.[0] || result.data || result.songs?.[0];
+    if (!audio?.url) throw new UnplayableError('Song has no playable audio URL');
+    return mapTrackUrl({ ...audio, level: audio.level || quality });
   }
 
   async getTrackLyrics(id: string): Promise<TrackLyrics> {
@@ -231,7 +222,7 @@ export class QQClient extends MusicClientBase {
   async searchPlaylists(keyword: string, offset: number, limit: number): Promise<PlaylistPage> {
     const raw = await this.call('cloudsearch', { keywords: keyword, type: 1000, offset, limit });
     const result = raw.result || {};
-    const items = Array.isArray(result.playlists) ? result.playlists.map((item: any) => mapPlaylist(item)) : [];
+    const items = Array.isArray(result.playlists) ? result.playlists.map((item: any) => this.playlistFavorites.apply(mapPlaylist(item))) : [];
     const total = result.playlistCount || 0;
     return { items, offset, limit, hasMore: offset + items.length < total };
   }
@@ -378,8 +369,13 @@ export class QQClient extends MusicClientBase {
   }
 
   async favoritePlaylist(id: string, status: boolean): Promise<{ success: boolean; status: boolean }> {
-    await this.call('playlist_subscribe', { id, t: status ? 1 : 0 });
+    const raw = await this.call('playlist_subscribe', { id, t: status ? 1 : 0 });
+    const result = raw.body || raw;
+    if (raw.success === false || Number(result.retCode ?? result.code ?? 0) !== 0) {
+      return { success: false, status: !status };
+    }
     this.setUserPlaylist(id, status);
+    this.playlistFavorites.set(id, status);
     return { success: true, status };
   }
 

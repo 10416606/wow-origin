@@ -13,7 +13,8 @@ describe('upstream sync workflow', () => {
     expect(workflow).toContain("if: github.repository != 'Anomi-oo/wow-origin'")
     expect(workflow).toContain('contents: write')
     expect(workflow).toContain('https://github.com/Anomi-oo/wow-origin.git')
-    expect(workflow).toContain('git read-tree --reset -u FETCH_HEAD')
+    expect(workflow).toContain('git merge --no-edit --no-ff FETCH_HEAD')
+    expect(workflow).not.toContain('git read-tree --reset -u FETCH_HEAD')
     expect(workflow).toContain('git push origin "HEAD:$DESTINATION_BRANCH"')
     expect(workflow).not.toMatch(/\[(?:skip ci|ci skip|no ci|skip actions|actions skip)\]/i)
 

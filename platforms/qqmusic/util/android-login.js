@@ -34,7 +34,7 @@ function md5(...values) {
 
 function aesBase64(key, value, iv = key) {
   const cipher = createCipheriv('aes-128-cbc', Buffer.from(key), Buffer.from(iv));
-  return Buffer.concat([cipher.update(String(value)), cipher.final()]).toString('base64');
+  return Buffer.concat([cipher.update(Buffer.from(String(value), 'utf8')), cipher.final()]).toString('base64');
 }
 
 function randomImei() {
@@ -247,4 +247,8 @@ function peekAndroidLoginContext(musicid) {
   return accountContexts.get(String(musicid || '').replace(/^o/, ''));
 }
 
-module.exports = { createAndroidLoginContext, createAndroidLoginContextFromIdentity, getAndroidLoginContext, bindAndroidLoginContext, peekAndroidLoginContext, encodeIdentity, decodeIdentity, deviceIdFromIdentity, createDevice, qimeiPayload };
+function forgetAndroidLoginContext(musicid) {
+  accountContexts.delete(String(musicid || '').replace(/^o/, ''));
+}
+
+module.exports = { forgetAndroidLoginContext, createAndroidLoginContext, createAndroidLoginContextFromIdentity, getAndroidLoginContext, bindAndroidLoginContext, peekAndroidLoginContext, encodeIdentity, decodeIdentity, deviceIdFromIdentity, createDevice, qimeiPayload };
