@@ -63,6 +63,8 @@ export interface LxRuntimeExit {
 }
 
 export interface LxTrackUrlResolver {
+  getTrackQualities?(platform: MusicPlatform, id: string): Promise<import('aduoer-wow-sdk').Quality[]>;
+  getQualityOptions?(platform: MusicPlatform): import('aduoer-wow-sdk').QualityOption[];
   resolveTrackUrl(
     platform: MusicPlatform,
     id: string,
