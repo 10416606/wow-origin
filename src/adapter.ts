@@ -106,10 +106,6 @@ export function createWowContextResolver(
     const origin = host && /^[a-zA-Z0-9.:-]+$/.test(host) ? `${protocol}://${host}` : undefined;
     const adapter = createAdapter(account, lxTrackUrlResolver, origin);
     const needed = collectionStatusNeeded(request?.path || '');
-    if (needed.playlists && !account.playlistFavorites.loaded) {
-      // 未能重建账号快照时向调用方报告错误，避免把未知状态呈现为未收藏。
-      await adapter.getUserPlaylist();
-    }
     if (needed.artists && !account.favoriteArtistsLoaded) {
       try {
         await adapter.userArtists();

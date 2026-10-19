@@ -1,12 +1,10 @@
 import type { Playlist } from 'aduoer-wow-sdk';
 
-/** 账号独立的歌单状态；完整列表替换快照，显式上游状态和成功写入立即更新。 */
+/** 账号独立的歌单缓存；读取不触发请求，完整列表、显式上游状态和成功写入更新快照。 */
 export class PlaylistFavorites {
   private readonly states = new Map<string, boolean>();
   private readonly ownIDs = new Set<string>();
-  loaded = false;
-
-  clear(): void { this.states.clear(); this.ownIDs.clear(); this.loaded = false; }
+  clear(): void { this.states.clear(); this.ownIDs.clear(); }
   replace(playlists: Playlist[]): void {
     this.states.clear();
     this.ownIDs.clear();
@@ -14,7 +12,6 @@ export class PlaylistFavorites {
       this.states.set(playlist.id, playlist.favorite);
       if (!playlist.favorite) this.ownIDs.add(playlist.id);
     });
-    this.loaded = true;
   }
   set(id: string, favorite: boolean): void { this.states.set(id, this.ownIDs.has(id) ? false : favorite); }
   remove(id: string): void { this.states.delete(id); this.ownIDs.delete(id); }
