@@ -1,6 +1,7 @@
 import type { Album, AlbumDetail, Artist, ArtistDetail, Playlist, SearchSuggest, Track, TrackLyrics, TrackUrl, UserProfile } from 'aduoer-wow-sdk';
 import { makeTrackLyrics, stripNeteaseWordLyricMetadata } from '../trackLyrics';
 import { mapTrackQualities } from '../quality';
+import { positionInteger } from '../trackPosition';
 import type { Lyrics } from '../types';
 
 type Creator = NonNullable<Playlist['creator']>;
@@ -100,6 +101,8 @@ export function mapTrack(track: any = {}): Track {
     artists: Array.isArray(track.ar) ? track.ar.map((artist: any) => mapArtist(artist)) : Array.isArray(track.artists) ? track.artists.map((artist: any) => mapArtist(artist)) : [],
     album: mapAlbum(track.al || track.album),
     durationMs: Number(track.dt) || 0,
+    discNumber: positionInteger(track.disc ?? track.cd),
+    trackNumber: positionInteger(track.no),
     aliases: Array.isArray(track.alia) ? track.alia.filter(Boolean) : [],
     mvId: optionalRawId(track.mv?.vid ?? track.mv?.id ?? track.mv),
     favorite: false,

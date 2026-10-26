@@ -2,6 +2,75 @@ const qqMappers = require('../../../dist/mappers/qq')
 const neteaseMappers = require('../../../dist/mappers/netease')
 
 describe('v1 mappers', () => {
+  test('网易专辑保留碟号和不连续曲号', () => {
+    const detail = neteaseMappers.mapAlbumDetail({ album: { id: 1 }, songs: [
+      { id: 1, no: 8, cd: '1' },
+      { id: 2, no: '12', disc: 2, cd: '1' },
+      { id: 3 }
+    ] })
+    expect(detail.tracks.map(({ discNumber, trackNumber }) => [discNumber, trackNumber]))
+      .toEqual([[1, 8], [2, 12], [undefined, undefined]])
+  })
+
+  test.each([null, 0, -1, 1.5, '', 'CD1', true, {}, Number.MAX_SAFE_INTEGER + 1])('无效位置 %p 不对外返回', (value) => {
+    for (const mapped of [
+      neteaseMappers.mapTrack({ no: value, disc: value }),
+      qqMappers.mapTrack({ trackNumber: value, discNumber: value })
+    ]) {
+      const json = JSON.parse(JSON.stringify(mapped))
+      expect(json).not.toHaveProperty('trackNumber')
+      expect(json).not.toHaveProperty('discNumber')
+    }
+  })
+
+  test('QQ 专辑累计曲序转换为碟内曲号，保持原有顺序和缺曲空位', () => {
+    const detail = qqMappers.mapAlbumDetail({ id: 1, list: [
+      { songmid: 'second-disc-fourth', belongCD: 16, cdIdx: 1 },
+      { songmid: 'first-disc-last', belongCD: 12, cdIdx: 0 },
+      { songmid: 'second-disc-first', belongCD: 13, cdIdx: 1 },
+      { songmid: 'second-disc-last', belongCD: 23, cdIdx: 1 },
+      { songmid: 'third-disc-first', belongCD: 24, cdIdx: 2 },
+      { songmid: 'missing-track-number', cdIdx: 2 }
+    ] })
+    expect(detail.tracks.map(({ id, discNumber, trackNumber }) => [id, discNumber, trackNumber]))
+      .toEqual([
+        ['second-disc-fourth', 2, 4], ['first-disc-last', 1, 12],
+        ['second-disc-first', 2, 1], ['second-disc-last', 2, 11],
+        ['third-disc-first', 3, 1], ['missing-track-number', 3, undefined]
+      ])
+  })
+
+  test('QQ 缺失换碟边界时不把累计曲序或列表位置作为曲号', () => {
+    const detail = qqMappers.mapAlbumDetail({ id: 1, list: [
+      { songmid: 'eighth', belongCD: 8, cdIdx: 0 },
+      { songmid: 'second-disc', belongCD: 15, cdIdx: 1 },
+      { songmid: 'unknown' }
+    ] })
+    expect(detail.tracks.map(({ discNumber, trackNumber }) => [discNumber, trackNumber]))
+      .toEqual([[1, 8], [2, undefined], [undefined, undefined]])
+    expect(qqMappers.mapTrack({ belongCD: 3 }).trackNumber).toBeUndefined()
+  })
+
+  test('QQ 歌曲详情只在第一碟直接采用累计曲序', () => {
+    expect(qqMappers.mapTrack({ index_album: 8, index_cd: 0 }))
+      .toMatchObject({ discNumber: 1, trackNumber: 8 })
+    const secondDisc = qqMappers.mapTrack({ index_album: 13, index_cd: 1 })
+    expect(secondDisc.discNumber).toBe(2)
+    expect(secondDisc.trackNumber).toBeUndefined()
+    expect(qqMappers.mapTrack({ index_album: 8 }).trackNumber).toBeUndefined()
+  })
+
+  test('QQ 碟号往返冲突时不覆盖换碟边界并生成错误曲号', () => {
+    const detail = qqMappers.mapAlbumDetail({ id: 1, list: [
+      { songmid: 'first-disc', belongCD: 13, cdIdx: 0 },
+      { songmid: 'second-disc-first', belongCD: 14, cdIdx: 1 },
+      { songmid: 'conflicting-disc', belongCD: 15, cdIdx: 0 },
+      { songmid: 'second-disc-third', belongCD: 16, cdIdx: 1 }
+    ] })
+    expect(detail.tracks.map(({ discNumber }) => discNumber)).toEqual([1, 2, 1, 2])
+    expect(detail.tracks.every(({ trackNumber }) => trackNumber === undefined)).toBe(true)
+  })
+
   test('统一歌单字段和秒级时间戳', () => {
     expect(qqMappers.mapPlaylist({
       id: 123,

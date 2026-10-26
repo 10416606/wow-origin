@@ -32,6 +32,8 @@ describe('QQMusic v1 依赖模块', () => {
           id: 1,
           mid: 'songMid',
           name: '歌曲',
+          index_album: 8,
+          index_cd: 1,
           singer: [],
           album: {},
           file: {
@@ -54,6 +56,7 @@ describe('QQMusic v1 依赖模块', () => {
       expect.any(Object)
     )
     expect(result.songs[0]).toMatchObject({ mid: 'songMid', name: '歌曲' })
+    expect(result.songs[0]).toMatchObject({ index_album: 8, index_cd: 1 })
     expect(result.songs[0].qualities).toEqual([
       expect.objectContaining({ key: 'standard', label: '标准' }),
       expect.objectContaining({ key: 'higher', label: '高品质' }),

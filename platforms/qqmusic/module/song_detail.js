@@ -68,6 +68,8 @@ function formatSongs(tracks) {
           picUrl: track.album?.mid ? `https://y.gtimg.cn/music/photo_new/T002R800x800M000${track.album.mid}.jpg` : ''
         },
         dt: (track.interval || 0) * 1000,
+        index_album: track.index_album,
+        index_cd: track.index_cd,
         mv: track.mv?.vid || 0,
         fee: track.pay ? track.pay.pay_play : 0,
         alia: [track.subtitle],
