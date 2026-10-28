@@ -1,6 +1,7 @@
 import type { Album, AlbumDetail, Artist, ArtistDetail, Playlist, Quality, SearchSuggest, Track, TrackLyrics, TrackUrl, UserProfile } from 'aduoer-wow-sdk';
 import { makeTrackLyrics } from '../trackLyrics';
 import type { Lyrics } from '../types';
+import { positionInteger } from '../trackPosition';
 
 type Creator = NonNullable<Playlist['creator']>;
 
@@ -118,12 +119,15 @@ function mapQualities(value: any): Quality[] {
 }
 
 export function mapTrack(track: any = {}): Track {
+  const discIndex = positionInteger(track.index_cd, 0);
   return {
     id: toStringId(track.mid || track.id),
     title: track.name || track.title || '',
     artists: (track.ar || track.artists || []).map((artist: any) => mapArtist(artist)),
     album: mapAlbum(track.al || track.album),
     durationMs: Number(track.dt) || 0,
+    discNumber: positionInteger(track.discNumber) ?? (discIndex === undefined ? undefined : discIndex + 1),
+    trackNumber: positionInteger(track.trackNumber) ?? (discIndex === 0 ? positionInteger(track.index_album) : undefined),
     aliases: Array.isArray(track.alia) ? track.alia.filter(Boolean) : [],
     mvId: optionalRawId(track.mv?.vid ?? track.mv?.id ?? track.mv),
     favorite: false,
@@ -141,6 +145,41 @@ export function mapArtistDetail(artist: any = {}): ArtistDetail {
     description: artist.briefDesc || artist.desc || artist.description || '',
     tracks: []
   };
+}
+
+/** QQ 专辑曲序为跨碟累计值；仅在相邻曲目证实换碟边界时计算碟内曲号。 */
+function albumPositions(songs: any[]): Map<any, Pick<Track, 'discNumber' | 'trackNumber'>> {
+  const rows = songs.flatMap((song) => {
+    const sortIndex = positionInteger(song.belongCD);
+    const discIndex = positionInteger(song.cdIdx, 0);
+    return sortIndex === undefined || discIndex === undefined ? [] : [{ song, sortIndex, discIndex }];
+  }).sort((a, b) => a.sortIndex - b.sortIndex);
+  const bases = new Map<number, number>([[0, 0]]);
+  const conflictingDiscs = new Set<number>();
+  for (let index = 1; index < rows.length; index++) {
+    const before = rows[index - 1];
+    const current = rows[index];
+    if (current.discIndex < before.discIndex) {
+      conflictingDiscs.add(before.discIndex);
+      conflictingDiscs.add(current.discIndex);
+    }
+    if (current.discIndex === before.discIndex + 1 && current.sortIndex === before.sortIndex + 1) {
+      const base = current.sortIndex - 1;
+      if (bases.has(current.discIndex) && bases.get(current.discIndex) !== base) {
+        conflictingDiscs.add(current.discIndex);
+      }
+      bases.set(current.discIndex, base);
+    }
+  }
+  return new Map(songs.map((song) => {
+    const discIndex = positionInteger(song.cdIdx, 0);
+    const sortIndex = positionInteger(song.belongCD);
+    const base = discIndex === undefined || conflictingDiscs.has(discIndex) ? undefined : bases.get(discIndex);
+    return [song, {
+      discNumber: discIndex === undefined ? undefined : discIndex + 1,
+      trackNumber: base === undefined || sortIndex === undefined ? undefined : positionInteger(sortIndex - base)
+    }];
+  }));
 }
 
 export function mapAlbumDetail(raw: any = {}): AlbumDetail {
@@ -171,9 +210,11 @@ export function mapAlbumDetail(raw: any = {}): AlbumDetail {
   };
 
   const songs = raw.list || raw.songs || albumSource.tracks || [];
+  const positions = albumPositions(songs);
   (songs || []).forEach((song: any) => {
     album.tracks.push(mapTrack({
       ...song,
+      ...positions.get(song),
       mid: song.songmid || song.mid || song.id,
       name: song.songname || song.name || song.title,
       ar: song.singer || song.ar || song.artists,
