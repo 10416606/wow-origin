@@ -20,12 +20,21 @@ module.exports = async (query, request) => {
   // an unexpectedly short result, and retain the old response if it fails.
   if (songs(legacyBody).length >= 10) return legacyBody
 
-  try {
-    const current = await request('/api/v3/discovery/recommend/songs', {
-      afresh: false
-    }, { ...options, crypto: 'weapi' })
-    return songs(current.body).length > songs(legacyBody).length ? current.body : legacyBody
-  } catch (_) {
-    return legacyBody
+  let best = legacyBody
+  const attempts = [{ transport: 'eapi', count: songs(best).length }]
+  for (const [crypto, data] of [['weapi', { afresh: false }], ['xeapi', { ispush: false }]]) {
+    try {
+      const current = await request('/api/v3/discovery/recommend/songs', data, { ...options, crypto })
+      const count = songs(current.body).length
+      attempts.push({ transport: crypto, count })
+      if (count > songs(best).length) best = current.body
+      if (songs(best).length >= 10) return best
+    } catch (error) {
+      // Log only numeric status, never cookies, URLs, upstream messages or bodies.
+      const status = error?.status ?? error?.body?.code ?? error?.response?.status
+      attempts.push({ transport: crypto, failed: true, status: typeof status === 'number' ? status : null })
+    }
   }
+  console.warn('[netease-daily] incomplete recommendations', JSON.stringify(attempts))
+  return best
 }
