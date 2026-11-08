@@ -1,3 +1,4 @@
+import { KugouClient } from './clients/KugouClient';
 import type { ResolveWowContext, TrackUrl } from 'aduoer-wow-sdk';
 import { type AccountSessionRegistry, type MusicAccountSession, extractAuthorizationToken } from './accounts';
 import { NeteaseClient } from './clients/NeteaseClient';
@@ -18,9 +19,12 @@ export function createMusicClient(
   favoriteArtistIds?: Set<string>,
   favoriteAlbumIds?: Set<string>,
   userPlaylistIds?: Set<string>,
-  deviceState?: string
-): QQClient | NeteaseClient | YTMusicClient {
-  return platform === 'ytmusic'
+  deviceState?: string,
+  kugouContext?: import('./kugouState').KugouAccountContext
+): QQClient | NeteaseClient | YTMusicClient | KugouClient {
+  return platform === 'kugou'
+    ? new KugouClient(cookie, favoriteTrackIds, favoriteArtistIds, favoriteAlbumIds, userPlaylistIds, kugouContext)
+    : platform === 'ytmusic'
     ? new YTMusicClient(cookie, favoriteTrackIds, favoriteArtistIds, favoriteAlbumIds, userPlaylistIds)
     : platform === 'qq'
     ? new QQClient(cookie, favoriteTrackIds, favoriteArtistIds, favoriteAlbumIds, userPlaylistIds, deviceState)
@@ -31,8 +35,8 @@ export function createAdapter(
   account: MusicAccountSession,
   lxTrackUrlResolver?: LxTrackUrlResolver,
   streamOrigin?: string
-): QQClient | NeteaseClient | YTMusicClient {
-  const client = createMusicClient(account.platform, account.cookie, account.favoriteTrackIds, account.favoriteArtistIds, account.favoriteAlbumIds, account.userPlaylistIds, account.deviceState);
+): QQClient | NeteaseClient | YTMusicClient | KugouClient {
+  const client = createMusicClient(account.platform, account.cookie, account.favoriteTrackIds, account.favoriteArtistIds, account.favoriteAlbumIds, account.userPlaylistIds, account.deviceState, account);
   client.playlistFavorites = account.playlistFavorites;
   const createPlaylist = client.createPlaylist.bind(client);
   client.createPlaylist = async (name) => {
@@ -91,8 +95,23 @@ export function createAdapter(
     return undefined;
   };
 
-  // 每个档位先尝试洛雪和官方；降级统一由 client 按歌曲详情决定。
+  // 每个档位按账号的音频获取策略决定洛雪与官方的先后；降级统一由 client 按歌曲详情决定。
   client.getTrackUrlForQuality = async (id: string, quality: string) => {
+    if (account.audioSourcePriority === 'account') {
+      // 账号优先：官方失败或拿到无效地址时再试洛雪；洛雪也拿不到时交回官方的结果或错误。
+      let official: TrackUrl | undefined;
+      let failure: unknown;
+      try {
+        official = await defaultGetTrackUrl(id, quality);
+        if (hasValidAudioUrl(official)) return official;
+      } catch (error) {
+        failure = error;
+      }
+      const lxTrackUrl = await getLxTrackUrl(id, quality);
+      if (lxTrackUrl) return lxTrackUrl;
+      if (official) return official;
+      throw failure;
+    }
     const lxTrackUrl = await getLxTrackUrl(id, quality);
     if (lxTrackUrl) return lxTrackUrl;
     return defaultGetTrackUrl(id, quality);

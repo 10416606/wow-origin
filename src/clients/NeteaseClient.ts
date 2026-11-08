@@ -1,7 +1,7 @@
 import type { Album, AlbumDetail, AlbumPage, Artist, ArtistDetail, ArtistPage, Playlist, PlaylistCategory, PlaylistDetail, PlaylistPage, SearchSuggest, ToplistGroup, Track, TrackLyrics, TrackPage, TrackUrl, UserProfile } from 'aduoer-wow-sdk';
 import { mapAlbum, mapAlbumDetail, mapArtist, mapArtistDetail, mapPlaylist, mapSearchSuggest, mapTrack, mapTrackLyrics, mapTrackUrl, mapUserDetail } from '../mappers/netease';
 import { MusicClientBase } from './MusicClientBase';
-import { NotFoundError, UnplayableError } from '../errors';
+import { APIError, BadRequestError, NotFoundError, UnplayableError, UpstreamError } from '../errors';
 import { getNeteasePlaylistCategoryMap } from '../playlistCategories';
 import { resolveTrackUrlWithFallback } from '../trackUrl';
 
@@ -42,23 +42,55 @@ export class NeteaseClient extends MusicClientBase {
   }
 
   async getToplist(): Promise<ToplistGroup[]> {
-    const raw = await this.call('toplist_detail_v2');
+    // v2 只提供精选分组；完整列表用于补齐遗漏的歌单榜，补充请求失败不影响原有分组。
+    const [raw, fullList] = await Promise.all([
+      this.call('toplist_detail_v2'),
+      this.call('toplist_detail').catch(() => ({}))
+    ]);
     const groups = Array.isArray(raw) ? raw : raw.data || raw.list || [];
-    return groups.map((group: any) => ({
-      name: group.name || '',
-      displayType: group.displayType || group.frontDisplayType || 'TOP_3',
-      list: (group.list || group.toplist || []).map((toplist: any) => ({
-        id: String(toplist.id ?? ''),
-        name: toplist.name || '',
-        coverUrl: toplist.coverUrl || toplist.coverImgUrl || '',
-        updateFrequency: toplist.updateFrequency || '',
-        tracks: (toplist.tracks || toplist.trackRankList || toplist.songList || []).slice(0, 3).map((track: any) => ({
-          name: track.first || track.songName || track.songname || '',
-          artistName: track.second || track.artistName || track.singername || ''
-        })),
-        targetType: toplist.targetType || ''
-      }))
-    }));
+    const isPlaylist = (toplist: any): boolean => (
+      // H5 榜单没有歌单详情，且共用 id=0，会导致客户端列表标识冲突。
+      (!toplist.targetType || toplist.targetType === 'PLAYLIST')
+      && /^[1-9]\d*$/.test(String(toplist.id ?? ''))
+    );
+    const mapToplist = (toplist: any): ToplistGroup['list'][number] => ({
+      id: String(toplist.id),
+      name: toplist.name || '',
+      coverUrl: toplist.coverUrl || toplist.coverImgUrl || '',
+      updateFrequency: toplist.updateFrequency || '',
+      tracks: (toplist.tracks || toplist.trackRankList || toplist.songList || []).slice(0, 3).map((track: any) => ({
+        name: track.first || track.songName || track.songname || '',
+        artistName: track.second || track.artistName || track.singername || ''
+      })),
+      targetType: 'PLAYLIST'
+    });
+    const result: ToplistGroup[] = [];
+    const more: ToplistGroup['list'] = [];
+    for (const group of groups) {
+      const mapped = {
+        name: group.name || '',
+        displayType: group.displayType || group.frontDisplayType || 'TOP_3',
+        list: (group.list || group.toplist || []).filter(isPlaylist).map(mapToplist)
+      };
+      if (group.categoryCode === 'TOPPING') {
+        more.push(...mapped.list);
+      } else if (mapped.list.length > 0) {
+        result.push(mapped);
+      }
+    }
+
+    const existingIds = new Set([...more, ...result.flatMap((group) => group.list)].map((toplist) => toplist.id));
+    const additional = (fullList.list || []).filter(isPlaylist).filter((toplist: any) => {
+      const id = String(toplist.id);
+      if (existingIds.has(id)) return false;
+      existingIds.add(id);
+      return true;
+    }).map(mapToplist);
+    more.push(...additional);
+    if (more.length > 0) {
+      result.push({ name: '更多榜单', displayType: 'ONLY_COVER', list: more });
+    }
+    return result;
   }
 
   async getToplistTracks(id: string, offset: number, limit: number): Promise<PlaylistDetail> {
@@ -81,6 +113,12 @@ export class NeteaseClient extends MusicClientBase {
     const raw = await this.call('top_artists');
     const artists = this.toArrayPayload(raw, ['artists', 'list']);
     return this.withFavoriteArtists(artists.map((item: any) => mapArtist(item)));
+  }
+
+  async getArtists(offset: number, limit: number): Promise<ArtistPage> {
+    const raw = await this.call('artist_list', { offset, limit, type: -1, area: -1, initial: -1 });
+    const items = this.withFavoriteArtists((raw.artists || []).map((item: any) => mapArtist(item)));
+    return { items, offset, limit, hasMore: raw.more === true };
   }
 
   async getRecommendedPlaylist(offset: number, limit: number): Promise<PlaylistPage> {
@@ -131,11 +169,18 @@ export class NeteaseClient extends MusicClientBase {
   }
 
   async getTrackUrl(id: string, quality?: string): Promise<TrackUrl> {
+    if (!/^\d+$/.test(id)) throw new BadRequestError('网易云歌曲 ID 必须为数字');
     return resolveTrackUrlWithFallback('netease', quality, () => this.getTrackDetail(id), (candidate) => this.getTrackUrlForQuality(id, candidate));
   }
 
   async getTrackUrlForQuality(id: string, quality: string): Promise<TrackUrl> {
-    const raw = await this.call('song_url_xeapi', { id, level: quality });
+    let raw: any;
+    try {
+      raw = await this.call('song_url_xeapi', { id, level: quality });
+    } catch (error) {
+      if (error instanceof APIError) throw error;
+      throw new UpstreamError('获取歌曲链接失败');
+    }
     const audio = [raw?.data, raw?.body?.data, raw?.songs, raw]
       .flatMap((candidate) => Array.isArray(candidate) ? candidate : [candidate])
       .find((item) => item?.url);
@@ -250,7 +295,8 @@ export class NeteaseClient extends MusicClientBase {
     return detail;
   }
 
-  async getUserPlaylist(): Promise<Playlist[]> {
+  private async loadUserPlaylists(): Promise<{ items: Playlist[]; likedPlaylist?: Playlist }> {
+    let likedPlaylist: Playlist | undefined;
     const items: Playlist[] = [];
     const seen = new Set<string>();
     const limit = 1000;
@@ -263,11 +309,17 @@ export class NeteaseClient extends MusicClientBase {
         if (!item.id || seen.has(item.id)) continue;
         seen.add(item.id);
         items.push(item);
+        if (!likedPlaylist && Number(playlist.specialType) === 5 && playlist.subscribed === false) likedPlaylist = item;
       }
       if (raw.more !== true || items.length === previousCount) break;
     }
     this.replaceUserPlaylists(items);
-    return items;
+    return { items, likedPlaylist };
+  }
+
+  async getUserPlaylist(): Promise<Playlist[]> {
+    const { items, likedPlaylist } = await this.loadUserPlaylists();
+    return items.filter(item => item.id !== likedPlaylist?.id);
   }
 
   async userArtists(): Promise<Artist[]> {
@@ -289,8 +341,7 @@ export class NeteaseClient extends MusicClientBase {
   }
 
   async userFavoriteTracks(): Promise<Track[]> {
-    const playlists = await this.getUserPlaylist();
-    const favoritePlaylist = playlists.find((playlist) => /.+喜欢的音乐$/.test(playlist.name));
+    const { likedPlaylist: favoritePlaylist } = await this.loadUserPlaylists();
     if (!favoritePlaylist) {
       this.clearFavoriteTracks();
       return [];
@@ -344,6 +395,14 @@ export class NeteaseClient extends MusicClientBase {
   async addTrackToPlaylist(playlistId: string, trackId: string): Promise<{ success: boolean }> {
     const raw = await this.call('playlist_tracks', { pid: playlistId, tracks: trackId, op: 'add' });
     return { success: raw.code === undefined || Number(raw.code) === 200 };
+  }
+
+  /** 上游支持逗号分隔的歌曲列表；请求级错误继续由 HTTP 错误处理。 */
+  async addTracksToPlaylist(playlistId: string, trackIds: string[]): Promise<{ id: string }[]> {
+    if (!trackIds.length) return [];
+    const raw = await this.call('playlist_tracks', { pid: playlistId, tracks: trackIds.join(','), op: 'add' });
+    if (raw.code !== undefined && Number(raw.code) !== 200) throw new UpstreamError('网易云音乐添加歌曲失败');
+    return [];
   }
 
   async removeTrack(playlistId: string, trackId: string): Promise<{ success: boolean }> {

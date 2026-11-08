@@ -1,4 +1,20 @@
 const { NeteaseClient } = require('../../../dist/clients/NeteaseClient')
+const express = require('express')
+const request = require('supertest')
+const { createWowRouter } = require('aduoer-wow-sdk')
+
+function createTrackUrlApp(client) {
+  const app = express()
+  app.use(createWowRouter({
+    resolveContext: async () => ({
+      adapter: client,
+      stateless: false,
+      qualityMap: [{ key: 'master', label: '超清母带' }]
+    }),
+    validateResponses: false
+  }))
+  return app
+}
 
 describe('NeteaseClient', () => {
   beforeEach(() => {
@@ -85,6 +101,32 @@ describe('NeteaseClient', () => {
     }))
     expect(callModule).not.toHaveBeenCalledWith('lyric', expect.anything())
     expect(callModule).not.toHaveBeenCalledWith('lyric/new', expect.anything())
+  })
+
+  test('v1 接口对 QQ 歌曲 MID 返回明确的 400 响应', async () => {
+    const callModule = jest.fn()
+    global.__musicPlatformFactory__.getPlatform.mockReturnValue({ callModule })
+
+    const response = await request(createTrackUrlApp(new NeteaseClient('')))
+      .get('/v1/track/url?id=002DONNN2RB5K6&quality=master')
+      .expect(400)
+
+    expect(response.body).toEqual({ code: 400, message: '网易云歌曲 ID 必须为数字', data: null })
+    expect(callModule).not.toHaveBeenCalled()
+  })
+
+  test('v1 接口对网易音频上游异常返回 502 响应', async () => {
+    const callModule = jest.fn().mockResolvedValue({
+      code: 500,
+      message: 'Unexpected non-whitespace character after JSON'
+    })
+    global.__musicPlatformFactory__.getPlatform.mockReturnValue({ callModule })
+
+    const response = await request(createTrackUrlApp(new NeteaseClient('')))
+      .get('/v1/track/url?id=33418857&quality=master')
+      .expect(502)
+
+    expect(response.body).toEqual({ code: 502, message: '获取歌曲链接失败', data: null })
   })
 
   test('高音质请求返回其他音质时直接使用该链接和实际音质', async () => {
@@ -284,7 +326,7 @@ describe('NeteaseClient', () => {
     const callModule = jest.fn().mockResolvedValue({
       code: 200,
       playlist: [
-        { id: 1, name: '我喜欢的音乐', trackCount: 2, creator: { userId: 88 } },
+        { id: 1, name: '我喜欢的音乐', specialType: 5, subscribed: false, trackCount: 2, creator: { userId: 88 } },
         {
           id: 'cloud-storage',
           name: '云盘音乐',
@@ -300,7 +342,7 @@ describe('NeteaseClient', () => {
     const client = new NeteaseClient('MUSIC_U=music-u')
     const playlists = await client.getUserPlaylist()
 
-    expect(playlists[1]).toMatchObject({
+    expect(playlists[0]).toMatchObject({
       id: 'cloud-storage',
       name: '云盘音乐',
       coverUrl: '',
@@ -317,7 +359,7 @@ describe('NeteaseClient', () => {
           code: 200,
           playlist: [
             { id: 100, name: '普通歌单', trackCount: 1, creator: {} },
-            { id: 200, name: '小明喜欢的音乐', trackCount: 2, creator: {} },
+            { id: 200, specialType: 5, subscribed: false, name: '小明喜欢的音乐', trackCount: 2, creator: {} },
             { id: 300, name: '小红喜欢的音乐', trackCount: 1, creator: {} }
           ]
         })
@@ -370,6 +412,7 @@ describe('NeteaseClient', () => {
       code: 200,
       data: [{
         name: '榜单推荐',
+        categoryCode: 'TOPPING',
         displayType: 'ONLY_COVER',
         list: [{
           id: 1,
@@ -394,7 +437,7 @@ describe('NeteaseClient', () => {
     expect(callModule).toHaveBeenCalledWith('toplist/detail/v2', expect.objectContaining({
       query: expect.objectContaining({ MUSIC_U: 'music-u', platform: 'netease' })
     }))
-    expect(toplists[0]).toMatchObject({ name: '榜单推荐', displayType: 'ONLY_COVER' })
+    expect(toplists[0]).toMatchObject({ name: '更多榜单', displayType: 'ONLY_COVER' })
     expect(toplists[0].list[0]).toMatchObject({ name: '热歌榜', targetType: 'PLAYLIST' })
     expect(toplists[0].list[0].tracks).toHaveLength(3)
     expect(toplists[0].list[0].tracks[0]).toEqual({ name: '第一首', artistName: '歌手 A' })
@@ -418,6 +461,122 @@ describe('NeteaseClient', () => {
     const detail = await client.getToplistTracks('19723756', 0, 100)
 
     expect(detail.trackCount).toBe(100)
+  })
+
+  test('榜单 API 过滤网页入口和无效歌单，移除空分组并保留无歌曲预览的有效榜单', async () => {
+    const callModule = jest.fn((route) => Promise.resolve(route === 'toplist/detail/v2' ? {
+      code: 200,
+      data: [{
+        name: '官方榜',
+        displayType: 'TOP_3',
+        list: [
+          { id: 19723756, name: '飙升榜', targetType: 'PLAYLIST', canPlay: true },
+          { id: 0, name: '畅销榜', targetType: 'H5', canPlay: false },
+          { id: 0, name: '全民热推榜', targetType: 'H5', canPlay: false },
+          { id: 0, name: '有声书榜', targetType: 'H5', canPlay: false },
+          { id: 123, name: '网页入口', targetType: 'H5' },
+          { id: 0, name: '无效歌单', targetType: 'PLAYLIST' },
+          { name: '缺少 ID', targetType: 'PLAYLIST' },
+          { id: 456, name: '播放受限但可查看详情的歌单榜', targetType: 'PLAYLIST', canPlay: false }
+        ]
+      }, {
+        name: '实体榜',
+        list: [{ id: 0, name: '实体专辑榜', targetType: 'H5', canPlay: false }]
+      }, {
+        name: '曲风榜',
+        displayType: 'ONLY_COVER',
+        list: [{ id: 71385702, name: '网易云ACG榜', targetType: 'PLAYLIST', tracks: null }]
+      }]
+    } : { code: 200, list: [] }))
+    global.__musicPlatformFactory__.getPlatform.mockReturnValue({ callModule })
+
+    const response = await request(createTrackUrlApp(new NeteaseClient(''))).get('/v1/toplist/list').expect(200)
+
+    expect(response.body.data.map(({ name }) => name)).toEqual(['官方榜', '曲风榜'])
+    expect(response.body.data.flatMap(({ list }) => list.map(({ id }) => id))).toEqual(['19723756', '456', '71385702'])
+    expect(response.body.data[1].list[0].tracks).toEqual([])
+  })
+
+  test('完整榜单接口补齐 v2 遗漏的榜单，按 ID 去重并保留原有分组', async () => {
+    const callModule = jest.fn((route) => Promise.resolve(route === 'toplist/detail/v2' ? {
+      code: 200,
+      data: [{
+        name: '官方榜',
+        displayType: 'TOP_3',
+        list: [{ id: 19723756, name: '飙升榜', targetType: 'PLAYLIST', coverUrl: 'https://original-cover' }]
+      }]
+    } : {
+      code: 200,
+      list: [
+        { id: '19723756', name: '飙升榜', coverImgUrl: 'https://other-cover' },
+        { id: 1978921795, name: '网易云电音榜', coverImgUrl: 'https://edm-cover', updateFrequency: '每周五更新' },
+        { id: '1978921795', name: '网易云电音榜' },
+        { id: 3001835560, name: '网易云ACG动画榜', tracks: [{ first: '歌曲', second: '歌手' }] },
+        { id: 0, name: '无效入口' },
+        { id: 123, name: '网页入口', targetType: 'H5' }
+      ]
+    }))
+    global.__musicPlatformFactory__.getPlatform.mockReturnValue({ callModule })
+
+    const response = await request(createTrackUrlApp(new NeteaseClient('MUSIC_U=music-u'))).get('/v1/toplist/list').expect(200)
+    const groups = response.body.data
+
+    expect(groups).toHaveLength(2)
+    expect(groups[0]).toMatchObject({ name: '官方榜', displayType: 'TOP_3', list: [{ id: '19723756', coverUrl: 'https://original-cover' }] })
+    expect(groups[1]).toMatchObject({ name: '更多榜单', displayType: 'ONLY_COVER' })
+    expect(groups[1].list).toEqual([
+      { id: '1978921795', name: '网易云电音榜', coverUrl: 'https://edm-cover', updateFrequency: '每周五更新', tracks: [], targetType: 'PLAYLIST' },
+      { id: '3001835560', name: '网易云ACG动画榜', coverUrl: '', updateFrequency: '', tracks: [{ name: '歌曲', artistName: '歌手' }], targetType: 'PLAYLIST' }
+    ])
+    expect(callModule).toHaveBeenCalledWith('toplist/detail', expect.objectContaining({
+      query: expect.objectContaining({ MUSIC_U: 'music-u', platform: 'netease' })
+    }))
+  })
+
+  test('补充榜单请求失败时仍返回 v2 的有效榜单', async () => {
+    const callModule = jest.fn((route) => Promise.resolve(route === 'toplist/detail/v2' ? {
+      code: 200,
+      data: [{ name: '官方榜', list: [{ id: 19723756, name: '飙升榜', targetType: 'PLAYLIST' }] }]
+    } : { code: 502, message: 'Upstream unavailable' }))
+    global.__musicPlatformFactory__.getPlatform.mockReturnValue({ callModule })
+
+    const groups = await new NeteaseClient('').getToplist()
+
+    expect(groups).toHaveLength(1)
+    expect(groups[0].list.map(({ id }) => id)).toEqual(['19723756'])
+  })
+
+  test('两个榜单接口复用现有平台缓存，跨账号共享并在 24 小时后刷新上游', async () => {
+    const BasePlatform = require('../../../platforms/base/BasePlatform')
+    const { PlatformCache } = require('../../../core/PlatformCache')
+    const platform = new BasePlatform({ name: 'netease' })
+    platform.cache = new PlatformCache()
+    platform.initialized = true
+    platform.modules.set('toplist/detail/v2', require('../../../platforms/netease/module/toplist_detail_v2'))
+    platform.modules.set('toplist/detail', require('../../../platforms/netease/module/toplist_detail'))
+    const upstream = jest.fn((uri) => Promise.resolve({ body: uri.endsWith('/v2') ? {
+      code: 200,
+      data: [{ name: '官方榜', list: [{ id: 19723756, name: '飙升榜', targetType: 'PLAYLIST' }] }]
+    } : { code: 200, list: [{ id: 1978921795, name: '网易云电音榜' }] } }))
+    platform.createRequestFunction = () => upstream
+    global.__musicPlatformFactory__.getPlatform.mockReturnValue(platform)
+    const startedAt = Date.now()
+    const now = jest.spyOn(Date, 'now').mockReturnValue(startedAt)
+
+    const first = await new NeteaseClient('MUSIC_U=first-account').getToplist()
+    const second = await new NeteaseClient('MUSIC_U=second-account').getToplist()
+
+    expect(second).toEqual(first)
+    expect(upstream.mock.calls.map(([uri]) => uri)).toEqual(['/api/toplist/detail/v2', '/api/toplist/detail'])
+
+    now.mockReturnValue(startedAt + 24 * 60 * 60 * 1000 - 1)
+    await new NeteaseClient('').getToplist()
+    expect(upstream).toHaveBeenCalledTimes(2)
+
+    now.mockReturnValue(startedAt + 24 * 60 * 60 * 1000 + 1)
+    await new NeteaseClient('').getToplist()
+    expect(upstream.mock.calls.filter(([uri]) => uri.endsWith('/v2'))).toHaveLength(2)
+    expect(upstream.mock.calls.filter(([uri]) => uri === '/api/toplist/detail')).toHaveLength(2)
   })
 
   test('favoritePlaylist 通过网易云歌单收藏模块按状态收藏或取消收藏', async () => {

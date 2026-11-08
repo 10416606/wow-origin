@@ -7,6 +7,7 @@ import type { AppLxSourceManager } from '../src/app';
 import type { MusicPlatform } from '../src/types';
 import type { LxPlatform, LxQuality } from '../src/lx-resource/types';
 import { getExactLxQuality } from '../src/lx-resource/quality';
+import { getLxQualityCandidates, mapLxQualityToTrackUrl, selectLxPlatform } from '../src/lx-resource/config';
 import { bundledLxSource, installBundledLxSource } from './generated/lx-source';
 
 const EVENT_NAMES = { request: 'request', inited: 'inited', updateAlert: 'updateAlert' } as const;
@@ -26,7 +27,7 @@ function selectQuality(requested: string | undefined, supported: readonly LxQual
   return undefined;
 }
 
-function trackUrl(url: string, quality: LxQuality): TrackUrl {
+function trackUrl(url: string, quality: LxQuality, platform: MusicPlatform): TrackUrl {
   if (url.length > 2048) throw new Error('洛雪源返回的地址过长');
   const parsed = new URL(url);
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('洛雪源返回了非 HTTP 地址');
@@ -40,9 +41,7 @@ function trackUrl(url: string, quality: LxQuality): TrackUrl {
     parsed.protocol = 'https:';
     url = parsed.toString();
   }
-  if (quality === '128k') return { url, quality: 'standard', format: '', bitrate: 128_000, size: 0 };
-  if (quality === '320k') return { url, quality: 'exhigh', format: '', bitrate: 320_000, size: 0 };
-  return { url, quality: quality === 'flac' ? 'lossless' : quality === 'atmos' ? 'sky' : quality, format: '', bitrate: null, size: 0 };
+  return mapLxQualityToTrackUrl(url, quality, platform);
 }
 
 class UnavailableAudioError extends Error {}
@@ -267,7 +266,7 @@ export class CloudflareLxSourceManager implements AppLxSourceManager {
       send: async (event: string, data?: any) => {
         if (event === EVENT_NAMES.updateAlert) return;
         if (event !== EVENT_NAMES.inited) throw new Error('不支持的洛雪事件');
-        for (const platform of ['tx', 'wy'] as const) {
+        for (const platform of ['tx', 'wy', 'kg', 'kugou'] as const) {
           const source = data?.sources?.[platform];
           const qualities = Array.isArray(source?.qualitys)
             ? source.qualitys.filter((item: unknown): item is LxQuality => QUALITIES.includes(item as LxQuality))
@@ -316,7 +315,10 @@ export class CloudflareLxSourceManager implements AppLxSourceManager {
     const options = this.getQualityOptions(platform).filter(({ key }) => key !== 'max');
     const results = await Promise.all(options.map(async ({ key, label }) => {
       try {
-        const result = await this.resolveQuality(platform, id, (key === 'sky' ? 'atmos' : key) as LxQuality, 8000);
+        const source = selectLxPlatform(platform, this.capabilities);
+        const quality = getExactLxQuality(platform, key, source ? this.capabilities[source]?.qualities || [] : []);
+        if (!quality) return [];
+        const result = await this.resolveQuality(platform, id, quality, 8000);
         if (!result) return [];
         const audio = await this.inspectTrack(platform, id, result, 6000);
         return [{ key, label, size: audio.size, format: audio.format, bitrate: audio.bitrate }];
@@ -327,8 +329,13 @@ export class CloudflareLxSourceManager implements AppLxSourceManager {
     return results.flat();
   }
   getQualityOptions(platform: MusicPlatform) {
-    const supported = this.capabilities[platform === 'qq' ? 'tx' : 'wy']?.qualities || [];
-    if (platform === 'ytmusic') return [];
+    const source = selectLxPlatform(platform, this.capabilities);
+    if (!source) return [];
+    const supported = this.capabilities[source]?.qualities || [];
+    if (platform === 'kugou') return [
+      ...(getExactLxQuality(platform, 'hires', supported) ? [{ key: 'hires', label: 'Hi-Res 高解析' }] : []),
+      ...(supported.length ? [{ key: 'max', label: '自动最高音质（失败逐级降级）' }] : [])
+    ];
     const labels = { flac24bit: '24 位无损', hires: 'Hi-Res 高解析', atmos: '沉浸环绕声', master: '母带' };
     return [
       ...(Object.keys(labels) as (keyof typeof labels)[])
@@ -348,10 +355,12 @@ export class CloudflareLxSourceManager implements AppLxSourceManager {
     options: { allowFallback?: boolean } = {}
   ): Promise<TrackUrl | undefined> {
     if (platform === 'ytmusic' || requestedQuality === 'jyeffect') return undefined;
-    const source: LxPlatform = platform === 'qq' ? 'tx' : 'wy';
+    const source = selectLxPlatform(platform, this.capabilities);
+    if (!source) return undefined;
     const supported = this.capabilities[source]?.qualities || [];
     const exact = getExactLxQuality(platform, requestedQuality, supported);
-    const selected = options.allowFallback === false ? exact : selectQuality(requestedQuality, supported);
+    const selected = options.allowFallback === false ? exact
+      : platform === 'kugou' ? getLxQualityCandidates(requestedQuality, supported, platform)[0] : selectQuality(requestedQuality, supported);
     if (!selected) return undefined;
     const candidates = options.allowFallback === false ? [selected]
       : QUALITIES.slice(0, QUALITIES.indexOf(selected) + 1).reverse()
@@ -375,7 +384,8 @@ export class CloudflareLxSourceManager implements AppLxSourceManager {
 
   private async resolveQuality(platform: MusicPlatform, id: string, quality: LxQuality, timeoutMs: number): Promise<TrackUrl | undefined> {
     if (!this.requestHandler) return undefined;
-    const source: LxPlatform = platform === 'qq' ? 'tx' : 'wy';
+    const source = selectLxPlatform(platform, this.capabilities);
+    if (!source) return undefined;
     const invocation = Promise.resolve(this.requestHandler({
       source,
       action: 'musicUrl',
@@ -384,6 +394,7 @@ export class CloudflareLxSourceManager implements AppLxSourceManager {
         musicInfo: {
           id,
           songmid: id,
+          ...(platform === 'kugou' ? { hash: id } : {}),
           ...(source === 'tx' ? { strMediaMid: id } : {}),
           source,
           types: this.capabilities[source]!.qualities.map((type) => ({ type, size: null }))
@@ -402,7 +413,7 @@ export class CloudflareLxSourceManager implements AppLxSourceManager {
     } finally {
       if (timeout) clearTimeout(timeout);
     }
-    return typeof result === 'string' && result ? trackUrl(result, quality) : undefined;
+    return typeof result === 'string' && result ? trackUrl(result, quality, platform) : undefined;
   }
 }
 

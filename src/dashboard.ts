@@ -1,3 +1,4 @@
+import { kugouEdition } from './kugouState';
 import os from 'node:os';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { deleteAccount } from './accounts';
@@ -6,6 +7,8 @@ import type { Request, Response, Router } from 'express';
 import express from 'express';
 import type { AccountSessionRegistry } from './accounts';
 import { qrCodeDataUrl } from './qr';
+
+const platformFactory = require('../platforms/PlatformFactory');
 
 export interface DashboardAddress {
   ip: string;
@@ -77,6 +80,7 @@ function browserEndpoint(req: Request): { ip: string; port: number } {
 export function createDashboardRouter(options: {
   registry?: AccountSessionRegistry;
   cloudflare?: boolean;
+  edgeone?: boolean;
   adminManagementPassword?: string;
   accountStore?: AccountStore;
   onAccountsChanged?: () => void;
@@ -96,7 +100,7 @@ export function createDashboardRouter(options: {
     }
     next();
   };
-  router.post('/accounts/delete', (req, res, next) => {
+  router.post('/accounts/delete', async (req, res, next) => {
     res.set('Cache-Control', 'no-store');
     const key = req.body?.api_access_key;
     if (typeof key !== 'string' || !key) { res.status(400).json({ code: 400, message: '缺少账号密钥' }); return; }
@@ -104,8 +108,32 @@ export function createDashboardRouter(options: {
       res.status(404).json({ code: 404, message: '账号不存在' }); return;
     }
     try {
-      deleteAccount(key, options.registry, options.accountStore);
-      options.onAccountsChanged?.();
+      const session = options.registry.byAccessKey.get(key)!;
+      if (session.platform === 'qq' || session.platform === 'netease') {
+        const platform = session.platform === 'qq' ? 'qqmusic' : 'netease';
+        const name = session.platform === 'qq' ? 'QQ 音乐' : '网易云音乐';
+        try {
+          const cookies = Object.fromEntries(session.cookie.split(';').flatMap((part) => {
+            const index = part.indexOf('=');
+            return index > 0 ? [[part.slice(0, index).trim(), part.slice(index + 1).trim()]] : [];
+          }));
+          const result = await platformFactory.getPlatform(platform).callModule('login/logout', {
+            query: { ...cookies, ...(session.platform === 'qq' ? { qq_android_identity: session.deviceState } : {}), platform, timestamp: Date.now() },
+            body: {}, ip: 'account-delete', connection: { remoteAddress: 'account-delete' }
+          });
+          if (result?.code !== 200 || Number(result.body?.code) !== 200) {
+            console.warn(`[accounts] ${name}退出登录失败，继续删除账号`, { code: result?.code, diagnostics: result?.diagnostics });
+          }
+        } catch (error) {
+          console.warn(`[accounts] ${name}退出登录请求异常，继续删除账号`, {
+            name: (error as Error)?.name, code: (error as { code?: string })?.code
+          });
+        }
+      }
+      if (options.registry.byAccessKey.has(key)) {
+        deleteAccount(key, options.registry, options.accountStore);
+        options.onAccountsChanged?.();
+      }
       res.json({ code: 200, data: null });
     } catch (error) { next(error); }
   });
@@ -115,6 +143,7 @@ export function createDashboardRouter(options: {
       code: 200,
       data: options.registry.sessions.map((session) => ({
         platform: session.platform,
+        ...(session.platform === 'kugou' ? { kugouEdition: kugouEdition(session.cookie) } : {}),
         name: session.name,
         apiAccessKey: session.apiAccessKey
       }))
@@ -156,7 +185,7 @@ export function createDashboardRouter(options: {
       const ips = lanAddresses.length > 0 ? lanAddresses : ['127.0.0.1'];
       const addresses: DashboardAddress[] = await Promise.all(ips.map(async (ip) => {
         const renderedIp = ip.includes(':') ? `[${ip}]` : ip;
-        const host = options.cloudflare
+        const host = options.cloudflare || options.edgeone
           ? `https://${req.headers.host || renderedIp}`
           : `http://${renderedIp}:${port}`;
         const { payload, addUrl } = createOriginAddPayload(host);
@@ -175,8 +204,8 @@ export function createDashboardRouter(options: {
         data: {
           status: 'running',
           adminManagementEnabled: enabled,
-          runtime: options.cloudflare ? 'cloudflare' : desktop ? 'desktop' : 'node',
-          accountLxSources: !options.cloudflare,
+          runtime: options.cloudflare ? 'cloudflare' : options.edgeone ? 'edgeone' : desktop ? 'desktop' : 'node',
+          accountLxSources: !options.cloudflare && !options.edgeone,
           port,
           preferredIp: addresses[0].ip,
           addresses
