@@ -20,10 +20,13 @@ jest.mock('../../cloudflare/generated/lx-source', () => ({
 
 const { CloudflareLxSourceManager } = require('../../cloudflare/lx-manager')
 
+beforeEach(() => { jest.spyOn(global, 'fetch').mockRejectedValue(new Error('metadata unavailable')) })
+afterEach(() => { jest.restoreAllMocks() })
+
 test('Cloudflare 洛雪与本地流程一致，只请求指定音质，由外层按详情降级', async () => {
   const manager = new CloudflareLxSourceManager()
   const options = { allowFallback: false }
-  await expect(manager.resolveTrackUrl('qq', 'track', 'lossless', [], options)).rejects.toThrow('SQ unavailable')
+  await expect(manager.resolveTrackUrl('qq', 'track', 'lossless', [], options)).resolves.toBeUndefined()
   await expect(manager.resolveTrackUrl('netease', 'track', 'hires', [], options)).resolves.toBeUndefined()
   await expect(manager.resolveTrackUrl('qq', 'track', 'higher', [], options)).resolves.toBeUndefined()
   await expect(manager.resolveTrackUrl('qq', 'track', 'exhigh', [], options)).resolves.toMatchObject({ quality: 'exhigh' })
@@ -38,4 +41,12 @@ test.each(['kg', 'kugou'])('云端洛雪支持 %s 标识、歌曲 hash 和 24bit
       url: `https://audio.test/${alias}/${hash}/${type}`, quality
     })
   }
+  expect(manager.getQualityOptions('kugou')).toEqual([
+    { key: 'hires', label: 'Hi-Res 高解析' },
+    { key: 'max', label: '自动最高音质（失败逐级降级）' }
+  ])
+  expect(await manager.getTrackQualities('kugou', hash)).toEqual([
+    { key: 'hires', label: 'Hi-Res 高解析', size: 0, format: '', bitrate: null }
+  ])
+  expect(manager.getQualityOptions('ytmusic')).toEqual([])
 })
