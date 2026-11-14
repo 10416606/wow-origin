@@ -16,6 +16,7 @@ import {
 } from './config';
 import { LxSourceRuntime } from './runtime';
 import { getExactLxQuality } from './quality';
+import { diagnosticError, logLxResolution } from './diagnostics';
 import type {
   LxLogLevel,
   LxSourceCapabilities,
@@ -25,6 +26,7 @@ import type {
 } from './types';
 
 const MAX_SOURCE_BYTES = 5 * 1024 * 1024;
+const log = require('../../core/Logger').createConsole({ component: 'lx-source' });
 const DOWNLOAD_TIMEOUT_MS = 15_000;
 const INITIALIZATION_TIMEOUT_MS = 10_000;
 const SOURCE_REQUEST_TIMEOUT_MS = 5_000;
@@ -61,12 +63,7 @@ function validateAudioUrl(value: unknown): string {
 }
 
 function safeErrorMessage(error: unknown): string {
-  if (axios.isAxiosError(error)) {
-    const status = error.response?.status;
-    return status ? `${error.code || 'HTTP_ERROR'} (${status})` : (error.code || 'network error');
-  }
-  const message = error instanceof Error ? error.message : String(error);
-  return message.replace(/https?:\/\/[^\s]+/g, '[url]').slice(0, 1024);
+  return JSON.stringify(diagnosticError(error));
 }
 
 export class LxSourceManager implements LxTrackUrlResolver, LxSourceLifecycle {
@@ -92,7 +89,7 @@ export class LxSourceManager implements LxTrackUrlResolver, LxSourceLifecycle {
     this.initialLoad = Promise.all(this.configs.map((config) => (
       this.runExclusive(config, () => this.loadAtStartup(config))
     ))).then(() => undefined).catch((error) => {
-      console.warn('[lx-source] initial background load failed', safeErrorMessage(error));
+      log.warn('initial background load failed', safeErrorMessage(error));
     });
   }
 
@@ -135,7 +132,7 @@ export class LxSourceManager implements LxTrackUrlResolver, LxSourceLifecycle {
     accountSources: readonly string[] = [],
     options: { allowFallback?: boolean } = {}
   ): Promise<TrackUrl | undefined> {
-    if (this.stopped || this.sources.size === 0) return undefined;
+    if (this.stopped) return undefined;
     const deadline = Date.now() + SOURCE_CHAIN_TIMEOUT_MS;
     const selectedConfigs = new Map<string, LxSourceConfig>();
     createLxSourceConfigs(accountSources).forEach((config) => selectedConfigs.set(config.hash, config));
@@ -157,6 +154,9 @@ export class LxSourceManager implements LxTrackUrlResolver, LxSourceLifecycle {
       for (const lxQuality of candidates) {
         const candidateRemaining = deadline - Date.now();
         if (candidateRemaining <= 0) break;
+        const attempt = { source: sourceLabel(source.name, config.hash), platform, id, quality: lxQuality };
+        const startedAt = Date.now();
+        let upstream: Record<string, unknown>[] = [];
         try {
           const result = await source.runtime.invoke({
             source: lxPlatform,
@@ -170,10 +170,14 @@ export class LxSourceManager implements LxTrackUrlResolver, LxSourceLifecycle {
               source: lxPlatform,
               types: capability.qualities.map((type) => ({ type, size: null }))
             }
-          });
-          return mapLxQualityToTrackUrl(validateAudioUrl(result), lxQuality, platform);
+          }, (responses) => { upstream = responses; });
+          const trackUrl = mapLxQualityToTrackUrl(validateAudioUrl(result), lxQuality, platform);
+          logLxResolution('info', '获取音频成功', { ...attempt, durationMs: Date.now() - startedAt });
+          return trackUrl;
         } catch (error) {
-          this.log('warn', source.name, config.hash, `获取音频失败: ${safeErrorMessage(error)}`);
+          const diagnostics = diagnosticError(error);
+          if (upstream.length) diagnostics.upstream = upstream;
+          logLxResolution('error', '获取音频失败', { ...attempt, durationMs: Date.now() - startedAt, error: diagnostics });
         }
       }
     }
@@ -342,10 +346,6 @@ export class LxSourceManager implements LxTrackUrlResolver, LxSourceLifecycle {
 
   private log(level: LxLogLevel, name: string, hash: string, message: string): void {
     const prefix = `[lx-source:${sourceLabel(name, hash)}]`;
-    const output = `${prefix} ${message}`;
-    if (level === 'error') console.error(output);
-    else if (level === 'warn') console.warn(output);
-    else if (level === 'debug') console.debug(output);
-    else console.info(output);
+    log[level](`${prefix} ${message}`);
   }
 }

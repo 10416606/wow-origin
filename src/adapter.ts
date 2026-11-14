@@ -10,6 +10,8 @@ import type { MusicPlatform } from './types';
 import type { LxTrackUrlResolver } from './lx-resource';
 import { createStreamUrl } from './ytmusic/stream';
 import { hasValidAudioUrl, resolveTrackUrlWithFallback } from './trackUrl';
+import { MissingCookieError } from './errors';
+import { diagnosticError, logLxResolution } from './lx-resource/diagnostics';
 
 /** 根据私有平台账号创建符合公开 SDK 契约的 Adapter。 */
 export function createMusicClient(
@@ -37,6 +39,11 @@ export function createAdapter(
   streamOrigin?: string
 ): QQClient | NeteaseClient | YTMusicClient | KugouClient {
   const client = createMusicClient(account.platform, account.cookie, account.favoriteTrackIds, account.favoriteArtistIds, account.favoriteAlbumIds, account.userPlaylistIds, account.deviceState, account);
+  if (!account.cookie.trim()) {
+    // 统一覆盖所有平台，避免游客账号请求个性化推荐上游。
+    client.getDailyTracks = async () => { throw new MissingCookieError(); };
+    client.getRoamTracks = async () => { throw new MissingCookieError(); };
+  }
   client.playlistFavorites = account.playlistFavorites;
   const createPlaylist = client.createPlaylist.bind(client);
   client.createPlaylist = async (name) => {
@@ -87,16 +94,17 @@ export function createAdapter(
       const lxTrackUrl = await lxTrackUrlResolver.resolveTrackUrl(account.platform, id, quality, account.lxSource || [], { allowFallback: false });
       if (hasValidAudioUrl(lxTrackUrl)) return lxTrackUrl;
       if (lxTrackUrl) {
-        console.warn('[lx-source] resolver returned an invalid audio URL, using official track URL flow');
+        logLxResolution('warn', '洛雪返回无效音频地址', { platform: account.platform, id, quality });
       }
-    } catch {
-      console.warn('[lx-source] unexpected resolver failure, using official track URL flow');
+    } catch (error) {
+      logLxResolution('warn', '洛雪解析异常', { platform: account.platform, id, quality, error: diagnosticError(error) });
     }
     return undefined;
   };
 
   // 每个档位按账号的音频获取策略决定洛雪与官方的先后；降级统一由 client 按歌曲详情决定。
   client.getTrackUrlForQuality = async (id: string, quality: string) => {
+    const context = { platform: account.platform, id, quality };
     if (account.audioSourcePriority === 'account') {
       // 账号优先：官方失败或拿到无效地址时再试洛雪；洛雪也拿不到时交回官方的结果或错误。
       let official: TrackUrl | undefined;
@@ -106,6 +114,7 @@ export function createAdapter(
         if (hasValidAudioUrl(official)) return official;
       } catch (error) {
         failure = error;
+        logLxResolution('warn', '官方获取音频失败，尝试洛雪', { ...context, error: diagnosticError(error) });
       }
       const lxTrackUrl = await getLxTrackUrl(id, quality);
       if (lxTrackUrl) return lxTrackUrl;
@@ -114,7 +123,13 @@ export function createAdapter(
     }
     const lxTrackUrl = await getLxTrackUrl(id, quality);
     if (lxTrackUrl) return lxTrackUrl;
-    return defaultGetTrackUrl(id, quality);
+    logLxResolution('info', '洛雪未获取到音频，回退官方', context);
+    try {
+      return await defaultGetTrackUrl(id, quality);
+    } catch (error) {
+      logLxResolution('warn', '官方回退获取音频失败', { ...context, error: diagnosticError(error) });
+      throw error;
+    }
   };
   client.getTrackUrl = (id: string, quality?: string) => resolveTrackUrlWithFallback(
     account.platform, quality, () => client.getTrackDetail(id), (candidate) => client.getTrackUrlForQuality(id, candidate), true

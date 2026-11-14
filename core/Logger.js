@@ -2,14 +2,36 @@
  * 优化的日志系统
  * - 简洁单行输出(常规操作)
  * - 详细JSON输出(错误和复杂数据)
- * - Emoji图标系统(快速识别)
+ * - 仅警告和错误显示图标
  * - 智能格式化(自动判断输出方式)
  * - 异步日志缓冲(减少I/O阻塞)
  */
 
 const { globalLogBuffer } = require('./AsyncLogBuffer')
+const { getRequestContext, formatRequestContextPrefix } = require('./RequestContext')
 
 class Logger {
+  /** 兼容多参数输出，所有运行时日志仍经过同一套级别、时间和上下文格式化。 */
+  static createConsole(context = {}) {
+    const logger = new Logger(context)
+    const write = (level, args) => {
+      if (!logger.shouldLog(level)) return
+      const message = args.map(value => {
+        if (value instanceof Error) value = logger.serializeError(value)
+        if (value && typeof value === 'object') return logger.formatCompactJSON(logger.maskSensitiveData(value))
+        return value === undefined ? '' : String(value)
+      }).join(' ')
+      logger.compact(level === 'warn' ? 'warning' : level, message, level)
+    }
+    return {
+      log: (...args) => write('info', args),
+      info: (...args) => write('info', args),
+      warn: (...args) => write('warn', args),
+      error: (...args) => write('error', args),
+      debug: (...args) => write('debug', args)
+    }
+  }
+
   constructor(context = {}) {
     this.context = context
     this.logLevel = process.env.LOG_LEVEL || 'info'
@@ -26,21 +48,8 @@ class Logger {
       'authorization' // 认证头
     ]
 
-    // Emoji图标映射
-    this.icons = {
-      success: '✅',
-      error: '❌',
-      warning: '⚠️',
-      info: 'ℹ️',
-      debug: '🔍',
-      request: '🌐',
-      cache: '⚡',
-      module: '📦',
-      platform: '🎵',
-      performance: '⏱️',
-      user: '👤',
-      search: '🔎'
-    }
+    // 仅保留错误和警告图标。
+    this.icons = { error: '❌', warning: '⚠️' }
 
     // 颜色代码
     this.colors = {
@@ -104,18 +113,11 @@ class Logger {
   request(route, time, options = {}) {
     if (!this.shouldLog('info')) return
 
-    const timestamp = this.getShortTime()
+    const timestamp = `${this.getTimestamp()} ${formatRequestContextPrefix()}`.trimEnd()
     const { platform, cached, error, params, ip } = options
 
     // 构建上下文标签 [platform/component]
-    const contextParts = []
-    if (platform) contextParts.push(platform)
-    if (this.context.platform && !platform) contextParts.push(this.context.platform)
-    if (this.context.component) contextParts.push(this.context.component)
-
-    const contextTag = contextParts.length > 0
-      ? ` ${this.colors.dim}[${this.colors.cyan}${contextParts.join('/')}${this.colors.dim}]${this.colors.reset}`
-      : ''
+    const contextTag = this.formatContextTag(platform)
 
     // IP标签（如果提供）
     const ipTag = ip
@@ -134,12 +136,12 @@ class Logger {
       globalLogBuffer.log(errorLog, true)  // 紧急刷新
     } else if (cached) {
       // 缓存命中 - 异步缓冲输出
-      const cacheLog = `${timestamp} ${this.icons.success} ${this.colors.green}${route}${this.colors.reset}${contextTag}${ipTag} ${this.colors.dim}| ${time}ms | ${this.icons.cache} CACHE${this.colors.reset}`
+      const cacheLog = `${timestamp} ${this.colors.green}${route}${this.colors.reset}${contextTag}${ipTag} ${this.colors.dim}| ${time}ms | CACHE${this.colors.reset}`
       globalLogBuffer.log(cacheLog, false)
     } else {
       // 普通请求 - 异步缓冲输出
       const timeColor = time > 1000 ? this.colors.red : time > 500 ? this.colors.yellow : this.colors.cyan
-      let requestLog = `${timestamp} ${this.icons.request} ${this.colors.green}${route}${this.colors.reset}${contextTag}${ipTag} ${this.colors.dim}| ${timeColor}${time}ms${this.colors.reset}`
+      let requestLog = `${timestamp} ${this.colors.green}${route}${this.colors.reset}${contextTag}${ipTag} ${this.colors.dim}| ${timeColor}${time}ms${this.colors.reset}`
       if (params && Object.keys(params).length > 0) {
         const maskedParams = this.maskSensitiveData(params)
         requestLog += ` ${this.colors.dim}|${this.colors.reset} ${this.colors.gray}Params: ${this.formatCompactJSON(maskedParams)}${this.colors.reset}`
@@ -150,21 +152,21 @@ class Logger {
 
   /**
    * 简洁单行日志
-   * @param {string} icon - emoji图标key或直接的emoji
+   * @param {string} _icon - 保留旧调用签名，图标统一由日志级别决定
    * @param {string} message - 消息内容
    * @param {string} level - 日志级别
    */
-  compact(icon, message, level = 'info') {
+  compact(_icon, message, level = 'info') {
     if (!this.shouldLog(level)) return
 
-    const timestamp = this.getShortTime()
-    const emoji = this.icons[icon] || icon
+    const timestamp = `${this.getTimestamp()} ${formatRequestContextPrefix()}`.trimEnd()
+    const icon = this.getLevelIcon(level)
     const color = this.getLevelColor(level)
 
     // 构建上下文标签
     const contextTag = this.formatContextTag()
 
-    console.log(`${timestamp} ${emoji} ${color}${message}${this.colors.reset}${contextTag}`)
+    console.log(`${timestamp} ${icon ? `${icon} ` : ''}${color}${message}${this.colors.reset}${contextTag}`)
   }
 
   /**
@@ -175,15 +177,14 @@ class Logger {
    */
   detail(level, message, data = {}) {
     if (!this.shouldLog(level)) return
-
-    const timestamp = this.getShortTime()
+    const timestamp = `${this.getTimestamp()} ${formatRequestContextPrefix()}`.trimEnd()
     const color = this.getLevelColor(level)
     const icon = this.getLevelIcon(level)
 
     // 构建上下文标签
     const contextTag = this.formatContextTag()
 
-    console.log(`${timestamp} ${icon} ${color}${message}${this.colors.reset}${contextTag}`)
+    console.log(`${timestamp} ${icon ? `${icon} ` : ''}${color}${message}${this.colors.reset}${contextTag}`)
 
     if (data && Object.keys(data).length > 0) {
       const maskedData = this.maskSensitiveData(data)
@@ -195,9 +196,11 @@ class Logger {
    * 格式化上下文标签
    * @returns {string} 格式化的上下文标签
    */
-  formatContextTag() {
+  formatContextTag(platform) {
+    const requestContext = getRequestContext()
     const contextParts = []
-    if (this.context.platform) contextParts.push(this.context.platform)
+    const resolvedPlatform = platform || requestContext?.platform || this.context.platform
+    if (resolvedPlatform) contextParts.push(resolvedPlatform)
     if (this.context.component) contextParts.push(this.context.component)
 
     return contextParts.length > 0
@@ -247,14 +250,18 @@ class Logger {
   }
 
   /**
-   * 获取短时间格式 HH:mm:ss
+   * 获取本地时间格式 yyyy-MM-dd HH:mm:ss.SSS
    */
-  getShortTime() {
+  getTimestamp() {
     const now = new Date()
+    const year = String(now.getFullYear()).padStart(4, '0')
+    const month = String(now.getMonth() + 1).padStart(2, '0')
+    const day = String(now.getDate()).padStart(2, '0')
+    const milliseconds = String(now.getMilliseconds()).padStart(3, '0')
     const hours = String(now.getHours()).padStart(2, '0')
     const minutes = String(now.getMinutes()).padStart(2, '0')
     const seconds = String(now.getSeconds()).padStart(2, '0')
-    return `${this.colors.dim}${hours}:${minutes}:${seconds}${this.colors.reset}`
+    return `${this.colors.dim}${year}-${month}-${day} ${hours}:${minutes}:${seconds}.${milliseconds}${this.colors.reset}`
   }
 
   /**
@@ -275,12 +282,10 @@ class Logger {
    */
   getLevelIcon(level) {
     const iconMap = {
-      info: this.icons.info,
       warn: this.icons.warning,
       error: this.icons.error,
-      debug: this.icons.debug
     }
-    return iconMap[level] || this.icons.info
+    return iconMap[level] || ''
   }
 
   /**

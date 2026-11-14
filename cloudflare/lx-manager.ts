@@ -2,19 +2,31 @@ import crypto from 'node:crypto';
 import { isIP } from 'node:net';
 import zlib from 'node:zlib';
 import { Buffer } from 'node:buffer';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type { TrackUrl } from 'aduoer-wow-sdk';
 import type { AppLxSourceManager } from '../src/app';
 import type { MusicPlatform } from '../src/types';
 import type { LxPlatform, LxQuality } from '../src/lx-resource/types';
 import { getExactLxQuality } from '../src/lx-resource/quality';
-import { getLxQualityCandidates, mapLxQualityToTrackUrl, selectLxPlatform } from '../src/lx-resource/config';
+import { getLxQualityCandidates, mapLxQualityToTrackUrl, selectLxPlatform, sourceLabel } from '../src/lx-resource/config';
 import { bundledLxSource, installBundledLxSource } from './generated/lx-source';
+import { diagnosticError, logLxResolution, safeDiagnosticText, upstreamResponse } from '../src/lx-resource/diagnostics';
+
+const log = require('../core/Logger').createConsole({ component: 'lx-source' });
 
 const EVENT_NAMES = { request: 'request', inited: 'inited', updateAlert: 'updateAlert' } as const;
 const QUALITIES: LxQuality[] = ['128k', '320k', 'flac', 'flac24bit', 'hires', 'atmos', 'master'];
 
 type SourceCapability = { actions: string[]; qualities: LxQuality[] };
 type RequestHandler = (input: Record<string, unknown>) => unknown;
+const requestContext = new AsyncLocalStorage<Record<string, unknown>[]>();
+
+function recordUpstream(summary: Record<string, unknown>): void {
+  const responses = requestContext.getStore();
+  if (!responses) return;
+  responses.push(summary);
+  if (responses.length > 5) responses.shift();
+}
 
 function selectQuality(requested: string | undefined, supported: readonly LxQuality[]): LxQuality | undefined {
   if (requested === 'max') return [...QUALITIES].reverse().find((item) => supported.includes(item));
@@ -180,6 +192,7 @@ function request(
     const raw = Buffer.from(await response.arrayBuffer());
     if (raw.byteLength > 20 * 1024 * 1024) throw new Error('洛雪源请求响应超过 20 MiB');
     const parsed = parseBody(raw);
+    recordUpstream(upstreamResponse(response.status, parsed));
     callback(null, {
       statusCode: response.status,
       statusMessage: response.statusText,
@@ -188,7 +201,10 @@ function request(
       raw,
       body: parsed
     }, parsed);
-  }).catch((error) => callback(error, null, null)).finally(() => clearTimeout(timer));
+  }).catch((error) => {
+    recordUpstream(diagnosticError(error));
+    callback(error, null, null);
+  }).finally(() => clearTimeout(timer));
   return () => controller.abort();
 }
 
@@ -303,8 +319,21 @@ export class CloudflareLxSourceManager implements AppLxSourceManager {
       version: '2.0.0',
       env: 'cloudflare'
     };
-    const sandbox = { lx, console, setTimeout, clearTimeout, URL, URLSearchParams, TextEncoder, TextDecoder, atob, btoa };
-    installBundledLxSource(sandbox, console);
+    const sourceConsole = Object.create(console) as Console;
+    for (const level of ['log', 'info', 'warn', 'error', 'debug', 'group', 'groupCollapsed', 'groupEnd'] as const) {
+      sourceConsole[level] = (...args: unknown[]) => {
+        if (requestContext.getStore()) {
+          if (level === 'error' || level === 'warn') {
+            recordUpstream({ message: safeDiagnosticText(args.map(String).join(' ')) });
+          }
+          return;
+        }
+        const prefix = `[lx-source:${bundledLxSource.name || '未命名源'}#${bundledLxSource.digest?.slice(0, 6) || ''}]`;
+        log[level.startsWith('group') ? 'info' : level](prefix, ...args);
+      };
+    }
+    const sandbox = { lx, console: sourceConsole, setTimeout, clearTimeout, URL, URLSearchParams, TextEncoder, TextDecoder, atob, btoa };
+    installBundledLxSource(sandbox, sourceConsole);
     if (!this.requestHandler) throw new Error('打包的洛雪源没有注册 request 处理器');
   }
 
@@ -386,7 +415,10 @@ export class CloudflareLxSourceManager implements AppLxSourceManager {
     if (!this.requestHandler) return undefined;
     const source = selectLxPlatform(platform, this.capabilities);
     if (!source) return undefined;
-    const invocation = Promise.resolve(this.requestHandler({
+    const attempt = { source: sourceLabel(bundledLxSource.name || '未命名源', bundledLxSource.digest || ''), platform, id, quality };
+    const startedAt = Date.now();
+    const upstream: Record<string, unknown>[] = [];
+    const invocation = requestContext.run(upstream, () => Promise.resolve().then(() => this.requestHandler!({
       source,
       action: 'musicUrl',
       info: {
@@ -400,7 +432,7 @@ export class CloudflareLxSourceManager implements AppLxSourceManager {
           types: this.capabilities[source]!.qualities.map((type) => ({ type, size: null }))
         }
       }
-    }));
+    })));
     let timeout: ReturnType<typeof setTimeout> | undefined;
     let result: unknown;
     try {
@@ -410,10 +442,16 @@ export class CloudflareLxSourceManager implements AppLxSourceManager {
           timeout = setTimeout(() => reject(new Error('洛雪源请求超时')), timeoutMs);
         })
       ]);
+      if (typeof result !== 'string' || !result) throw new Error('洛雪源未返回音频地址');
+      const resolved = trackUrl(result, quality, platform);
+      logLxResolution('info', '获取音频成功', { ...attempt, durationMs: Date.now() - startedAt });
+      return resolved;
+    } catch (error) {
+      logLxResolution('error', '获取音频失败', { ...attempt, durationMs: Date.now() - startedAt, error: diagnosticError(error), upstream });
+      throw error;
     } finally {
       if (timeout) clearTimeout(timeout);
     }
-    return typeof result === 'string' && result ? trackUrl(result, quality, platform) : undefined;
   }
 }
 

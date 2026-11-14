@@ -5,7 +5,8 @@ import cookieParser from 'cookie-parser';
 import { createWowRouter, openApiDocument } from 'aduoer-wow-sdk';
 import { createWowContextResolver } from './adapter';
 import { preloadData } from './onload';
-import { APIError } from './errors';
+import { APIError, MissingCookieError } from './errors';
+import { runWithAccountContext } from '../core/RequestContext';
 import { AccountSessionRegistry, extractAuthorizationToken, loadAccountSessions } from './accounts';
 import type { AccountStore } from './storage';
 import { createLoginRouter } from './login';
@@ -236,19 +237,20 @@ class MultiPlatformServer {
         }
       }
       const session = this.accountSessions.byAccessKey.get(key);
-      if (!session || session.platform !== 'qq') return next();
-      try {
-        await ensureQQLoginFresh(session, {
-          registry: this.accountSessions,
-          platformFactory,
-          accountStore: this.accountStore,
-          logger: this.logger
-        });
+      return runWithAccountContext(session, async () => {
+        if (!session || session.platform !== 'qq') return next();
+        try {
+          await ensureQQLoginFresh(session, {
+            registry: this.accountSessions,
+            platformFactory,
+            accountStore: this.accountStore,
+            logger: this.logger
+          });
+        } catch (error) {
+          this.logger.error('QQ 登录状态检查或刷新失败，继续使用当前凭证', error);
+        }
         next();
-      } catch (error) {
-        this.logger.error('QQ 登录状态检查或刷新失败，继续使用当前凭证', error);
-        next();
-      }
+      });
     });
     this.app!.get('/v1/ytmusic/audio/:id', async (req: Request, res: Response, next: NextFunction) => {
       const verified = verifyStreamRequest(this.accountSessions.sessions, String(req.params.id), req.query);
@@ -336,7 +338,10 @@ class MultiPlatformServer {
     });
     this.app!.use(createWowRouter({
       resolveContext: createWowContextResolver(this.accountSessions, this.lxSourceManager),
-      onError: (error, request) => this.logger.error('Wow v1 request failed', error, { url: request.url })
+      onError: (error, request) => {
+        if (error instanceof MissingCookieError) return;
+        this.logger.error('Wow v1 request failed', error, { url: request.url });
+      }
     }));
     if (this.preload) {
       void preloadData(platformFactory, this.accountSessions, this.lxSourceManager).catch((error) => {
@@ -407,6 +412,7 @@ class MultiPlatformServer {
           if (!existing || existing.platform !== session.platform) return session;
           const cookieChanged = existing.cookie !== session.cookie;
           const previousCookie = existing.cookie;
+          existing.id = session.id;
           existing.name = session.name;
           existing.cookie = session.cookie;
           existing.stateless = session.stateless;
