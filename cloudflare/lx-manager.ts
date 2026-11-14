@@ -415,7 +415,10 @@ export class CloudflareLxSourceManager implements AppLxSourceManager {
     if (!this.requestHandler) return undefined;
     const source = selectLxPlatform(platform, this.capabilities);
     if (!source) return undefined;
-    const invocation = Promise.resolve(this.requestHandler({
+    const attempt = { source: sourceLabel(bundledLxSource.name || '未命名源', bundledLxSource.digest || ''), platform, id, quality };
+    const startedAt = Date.now();
+    const upstream: Record<string, unknown>[] = [];
+    const invocation = requestContext.run(upstream, () => Promise.resolve().then(() => this.requestHandler!({
       source,
       action: 'musicUrl',
       info: {
