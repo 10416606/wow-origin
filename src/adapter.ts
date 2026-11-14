@@ -10,6 +10,8 @@ import type { MusicPlatform } from './types';
 import type { LxTrackUrlResolver } from './lx-resource';
 import { createStreamUrl } from './ytmusic/stream';
 import { hasValidAudioUrl, resolveTrackUrlWithFallback } from './trackUrl';
+import { MissingCookieError } from './errors';
+import { diagnosticError, logLxResolution } from './lx-resource/diagnostics';
 
 /** 根据私有平台账号创建符合公开 SDK 契约的 Adapter。 */
 export function createMusicClient(
