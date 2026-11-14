@@ -76,10 +76,17 @@ describe('YouTube Music Wow client', () => {
         return { ok: true, text: async () => '<script>"VISITOR_DATA":"visitor-for-test"</script>' };
       }
       if (String(url).includes('/youtubei/v1/player')) {
-        return mockResponse({ videoDetails: {
-          title: 'Song', author: 'Artist', lengthSeconds: '180',
-          thumbnail: { thumbnails: [{ url: 'https://i.ytimg.com/video.jpg', width: 1280, height: 720 }] }
-        } });
+        return mockResponse({
+          videoDetails: {
+            title: 'Song', author: 'Artist', lengthSeconds: '180',
+            thumbnail: { thumbnails: [{ url: 'https://i.ytimg.com/video.jpg', width: 1280, height: 720 }] }
+          },
+          streamingData: { adaptiveFormats: [
+            { mimeType: 'audio/mp4; codecs="mp4a.40.2"', bitrate: 48000, url: 'https://audio.example/low', contentLength: '1000' },
+            { mimeType: 'audio/webm; codecs="opus"', bitrate: 160000, url: 'https://audio.example/opus', contentLength: '2500' },
+            { mimeType: 'audio/mp4; codecs="mp4a.40.2"', bitrate: 128000, url: 'https://audio.example/high', contentLength: '2000' }
+          ] }
+        });
       }
       return mockResponse({ contents: { playlistPanelVideoRenderer: {
         videoId: '11111111111',
@@ -93,7 +100,11 @@ describe('YouTube Music Wow client', () => {
     const detail = await new YTMusicClient('').getTrackDetail('11111111111');
     expect(detail).toMatchObject({
       id: '11111111111', durationMs: 180000,
-      album: { coverUrl: 'https://image.example/544.jpg' }
+      album: { coverUrl: 'https://image.example/544.jpg' },
+      qualities: [
+        { key: 'standard', label: '标准', bitrate: 48000, format: 'm4a', size: 1000 },
+        { key: 'higher', label: '高品质', bitrate: 128000, format: 'm4a', size: 2000 }
+      ]
     });
   });
 
